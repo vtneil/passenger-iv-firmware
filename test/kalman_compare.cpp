@@ -11,9 +11,9 @@
 using namespace vt;
 
 constexpr uint32_t BNO085_UPDATE_INTERVAL_US = 10UL * 1000UL;  // 10,000 us
-constexpr uint32_t SYSTEM_POLLING_INTERVAL = 5UL * 1000UL;   // ms * 1000 -> us
+constexpr uint32_t BNO085_POLLING_INTERVAL = 5UL * 1000UL;   // ms * 1000 -> us
 
-constexpr real_t dt = static_cast<real_t>(SYSTEM_POLLING_INTERVAL) * 0.001 * 0.001;
+constexpr real_t dt = static_cast<real_t>(BNO085_POLLING_INTERVAL) * 0.001 * 0.001;
 constexpr real_t d2t = integral_coefficient<1>() * (dt * dt);
 constexpr real_t d3t = integral_coefficient<2>() * (dt * dt * dt);
 constexpr real_t base_noise_value = 0.08;
@@ -42,7 +42,7 @@ struct kf_s {
     kalman_filter_t<4, 1, 1> x_cj{FCJ, BCJ, HCJ, QCJ, RCJ, xcj};
 } kf;
 
-struct mcu_data {
+struct mcu0_data {
     struct {
         numeric_vector<3> accel;
         numeric_vector<3> euler;
@@ -52,8 +52,8 @@ struct mcu_data {
 Adafruit_BNO08x bno085(-1);
 sh2_SensorValue_t bno085_values;
 
-smart_delay sd_bno085(SYSTEM_POLLING_INTERVAL, micros);
-//smart_delay_non_adaptive sd_bno085(SYSTEM_POLLING_INTERVAL, micros);
+smart_delay sd_bno085(BNO085_POLLING_INTERVAL, micros);
+//smart_delay_non_adaptive sd_bno085(BNO085_POLLING_INTERVAL, micros);
 
 void bno085_set_reports() {
     bno085.enableReport(SH2_ROTATION_VECTOR, BNO085_UPDATE_INTERVAL_US);
