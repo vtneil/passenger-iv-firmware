@@ -1,6 +1,15 @@
 #ifndef PASSENGER_IV_FIRMWARE_PSG_4_DEFINITIONS_H
 #define PASSENGER_IV_FIRMWARE_PSG_4_DEFINITIONS_H
 
+// Common Configurations
+//#define SIMPLE_RXTX
+
+// Tool Macros
+#define STR_REPR(V) ((V) ? "#" : ".")
+#define DIV_ROUND_UP(X, Y) (1 + ((X - 1) / Y))
+#define DIV_ROUND(X, Y) (X / Y)
+#define MOD_OP(X, Y) (X % Y)
+
 // Target Altitude
 #define TARGET_BURST_ALTITUDE   (40000.f)
 
@@ -17,6 +26,7 @@
 #define PIN_BOARD_LED           PC13
 #define PIN_LED                 PB4
 #define PIN_CTRL_CUT            PB5
+#define PIN_VBATT               PA1
 
 #define PIN_I2C_SCL1            PB6
 #define PIN_I2C_SDA1            PB7
@@ -28,8 +38,13 @@
 #define PIN_SPI_CS_SD_EXT       PB1
 #define SPI_SPEED_SD_MHZ        (20)
 
-#define PIN_M1                  PB14
-#define PIN_M0                  PB15
+#define LORA_CHANNEL            (33)
+
+#define PIN_LORA_M1             PB14
+#define PIN_LORA_M0             PB15
+
+#define GCS_PIN_LORA_M1         PB4
+#define GCS_PIN_LORA_M0         PB3
 
 #define EXT_TEMP_PIN            PA8
 
@@ -78,7 +93,7 @@ struct mcu0_data {
     float temperature_probe;
     float altitude_probe;
 
-    float batt_volt;
+    uint32_t batt_volt;
 };
 
 // States
@@ -94,9 +109,29 @@ enum class GlobalState : uint8_t {
 };
 
 // Transmission Sequences
-//constexpr uint8_t START_SEQ[4] = {0xaa, 0xaa, 0xaa, 0xaa};
 constexpr uint8_t START_SEQ[4] = {0xff, 0xff, 0xff, 0xff};
 
-#define CONV_STR(V) ((V) ? "#" : "-")
+using checksum_t = uint16_t;
+
+//const uint8_t START_SEQ[4] = {0xaa, 0xaa, 0xaa, 0xaa};
+
+template<typename OutputType = uint8_t, typename InputType>
+OutputType calc_checksum(InputType &data) {
+    using byte_t = uint8_t;
+    constexpr size_t q = DIV_ROUND(sizeof(InputType), sizeof(OutputType));
+    constexpr size_t r = MOD_OP(sizeof(InputType), sizeof(OutputType));
+    OutputType *ptr = reinterpret_cast<OutputType *>(&data);
+    OutputType chk = 0x0;
+    // Full XOR
+    for (size_t i = 0; i < q; ++i) {
+        chk ^= *ptr++;
+    }
+
+    // Partial XOR for remainder
+    for (size_t i = 0; i < r; ++i) {
+        *(reinterpret_cast<byte_t *>(&chk) + i) ^= *(reinterpret_cast<byte_t *>(ptr) + i);
+    }
+    return ~chk;
+}
 
 #endif //PASSENGER_IV_FIRMWARE_PSG_4_DEFINITIONS_H

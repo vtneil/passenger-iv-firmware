@@ -25,7 +25,7 @@ uint32_t list_files(SdFat32 &sd, const char *path = "/", Stream &stream = Serial
             stream.print(tmp);
             stream.print("\tSize = ");
             stream.print(entry.size());
-            stream.println("bytes");
+            stream.println(" bytes");
         } else if (entry.isDir()) {
             stream.print("Dir:  ");
             stream.println(tmp);

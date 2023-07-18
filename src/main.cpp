@@ -28,8 +28,9 @@
  */
 //#define DEBUG_PRINT
 #define ENABLE_IWDT
+#define ENABLE_UPLINK
 #define BLINK_STATUS
-#define SHOW_I2C
+//#define CONFIG_LORA
 
 /*
  * Namespaces
@@ -113,7 +114,7 @@ struct peripherals {
     bool m10s;
 } valid;
 
-lora_e22 lora(SerialLoRa, PIN_M0, PIN_M1);
+lora_e22 lora(SerialLoRa, PIN_LORA_M0, PIN_LORA_M1);
 SFE_UBLOX_GNSS m10s;                // Internal: SF u-blox M10S
 bme280_t bme280;                    // Internal: BME280
 Adafruit_MS8607 ms8607;             // External: MS8607
@@ -125,7 +126,7 @@ sh2_SensorValue_t bno085_values;    // (BNO085 data)
 /*
  * Smart delayers and Scheduler
  */
-task_scheduler<16> scheduler;
+task_scheduler<20> scheduler;
 
 /*
  * Functions
@@ -150,49 +151,75 @@ extern void write_sd0();
 
 extern void write_sd1();
 
+extern void write_usb();
+
 extern void write_comm();
 
 extern void calculate_state();
 
-extern void watch_and_list_sd();
+extern void debug_prompt_handler(Stream &stream);
 
-extern void i2cdetect(uint8_t first = 0, uint8_t last = 127);
+extern void i2cdetect(uint8_t first = 0, uint8_t last = 127, TwoWire &wire = Wire, Stream &stream = Serial);
 
 void setup() {
+#ifdef ENABLE_IWDT
+    static_cast<void>(IWatchdog.isReset(true));
+#endif
+
     // Enable onboard LED
     pinMode(PIN_BOARD_LED, OUTPUT);
     digitalWrite(PIN_BOARD_LED, !HIGH);
 
+    // Enable external LED
+    pinMode(PIN_LED, OUTPUT);
+    digitalWrite(PIN_LED, HIGH);
+
     // USB CDC Serial
     Serial.begin();
 
-    // Intentional delay for 250 ms
-    delayMicroseconds(250ul * 1000ul);
+    // Intentional delay for exactly 1000 ms
+    delayMicroseconds(1000ul * 1000ul);
+
+    // Config LoRa
+#ifdef CONFIG_LORA
+    Serial.println("Beginning configuration mode...");
+    lora.config();
+    Serial.println("Entered configuration mode!");
+    lora.set_param(0xffff,
+                    0,
+                    115200u,
+                    LoRaParity::PARITY_8N1,
+                    2400u,
+                    LORA_CHANNEL,
+                    240u,
+                    true);
+    lora.query_param();
+    Serial.println("Done config!");
+    delay(100u);
+#endif
 
     // SPI SD0 (Internal Flash)
-//    valid.sd0 = sd0.begin({PIN_SPI_CS_SD_INT, SHARED_SPI, SD_SCK_MHZ(SPI_SPEED_SD_MHZ), &SPI_SD});
-//    if (valid.sd0) make_new_filename(sd0, sd0_filename, "mcu0_data_sd0_", ".csv");
-//    if (valid.sd0) open_for_append(sd0, sd0_file, sd0_filename);
+    valid.sd0 = sd0.begin(SdSpiConfig(PIN_SPI_CS_SD_INT, SHARED_SPI, SD_SCK_MHZ(SPI_SPEED_SD_MHZ), &SPI_SD));
+    if (valid.sd0) {
+        make_new_filename(sd0, sd0_filename, "mcu0_data_sd0_", ".csv");
+        open_for_append(sd0, sd0_file, sd0_filename);
+    }
 
     // SPI SD1 (External Card)
-    valid.sd1 = sd1.begin({PIN_SPI_CS_SD_EXT, SHARED_SPI, SD_SCK_MHZ(SPI_SPEED_SD_MHZ), &SPI_SD});
-    if (valid.sd1) make_new_filename(sd1, sd1_filename, "mcu0_data_sd1_", ".csv");
-    if (valid.sd1) open_for_append(sd1, sd1_file, sd1_filename);
+    valid.sd1 = sd1.begin(SdSpiConfig(PIN_SPI_CS_SD_EXT, SHARED_SPI, SD_SCK_MHZ(SPI_SPEED_SD_MHZ), &SPI_SD));
+    if (valid.sd1) {
+        make_new_filename(sd1, sd1_filename, "mcu0_data_sd1_", ".csv");
+        open_for_append(sd1, sd1_file, sd1_filename);
+    }
 
-    // Delete all files! (For clearing only!!!)
-//    delete_all_in(sd0);
-//    delete_all_in(sd1);
+    // Intentional delay for exactly 1000 ms
+    delayMicroseconds(1000ul * 1000ul);
 
     // I2Cs
     Wire.setSCL(PIN_I2C_SCL1);
     Wire.setSDA(PIN_I2C_SDA1);
     Wire.setClock(I2C_CLOCK_STANDARD);
     Wire.begin();
-
-    // I2C Devices Detection Table
-#ifdef SHOW_I2C
-    i2cdetect();
-#endif
 
     // BME280 (0x77)
     valid.bme280 = (0x60 == bme280.begin(BME280_ADDRESS));
@@ -223,12 +250,19 @@ void setup() {
     ds18b20.begin();
     valid.ds18b20 = ds18b20.getAddress(one_wire_addresses, 0);
 
-    // WDT reloader task
+    // Battery Voltage Readings (1)
+    scheduler.add_task([]() -> void {
+        payload.batt_volt = analogRead(PIN_VBATT);
+    }, 1000ul, millis);
+
+    // WDT reloader task (1)
 #ifdef ENABLE_IWDT
-    scheduler.add_task([]() -> void { IWatchdog.reload(); }, WDT_INT_RELOAD, micros);
+    scheduler.add_task([]() -> void {
+        IWatchdog.reload();
+    }, WDT_INT_RELOAD, micros);
 #endif
 
-    // Sensor reading tasks
+    // Sensor reading tasks (6)
     scheduler
             .add_task(read_bme280, 100ul, millis, valid.bme280)
             .add_task(read_ms8607, 200ul, millis, valid.ms8607)
@@ -237,20 +271,26 @@ void setup() {
             .add_task(read_bno085, 100ul * 1000ul, micros, valid.bno085)
             .add_task(read_ds18b20, 1000ul, millis, valid.ds18b20);
 
-    // Data construction and communication tasks
+    // Data construction and communication tasks (5)
     scheduler
-            .add_task(construct_string, 500ul, millis)
+            .add_task(construct_string, 100ul, millis)
             .add_task(write_comm, 2000ul, millis)
+            .add_task(write_usb, 1000ul, millis)
             .add_task(write_sd0, 500ul, millis, valid.sd0)
-            .add_task(write_sd1, 500ul, millis, valid.sd1)
-            .add_task(watch_and_list_sd, 50ul, millis);
+            .add_task(write_sd1, 100ul, millis, valid.sd1);
 
-    // State calculation
+    // State calculation (1)
     scheduler.add_task(calculate_state, STATE_INT_UPDATE, millis);
 
-    // System
-#ifdef ENABLE_IWDT
-    IWatchdog.begin(WDT_INT_TIMEOUT);
+    // Debug from Uplink and USB (2)
+#ifdef ENABLE_UPLINK
+    scheduler
+            .add_task([]() -> void {
+                debug_prompt_handler(Serial);
+            }, 250ul, millis)
+            .add_task([]() -> void {
+                debug_prompt_handler(SerialLoRa);
+            }, 250ul, millis);
 #endif
 
     payload.band_id = 0;  // Set ID to main device
@@ -259,12 +299,21 @@ void setup() {
     // UARTs
     lora.begin(115200u);
 
-    // Turn off the board LED
+    // Turn off all LEDs
     digitalWrite(PIN_BOARD_LED, !LOW);
+    digitalWrite(PIN_LED, LOW);
+
+    // LED Blink during operation (1)
 #ifdef BLINK_STATUS
-    scheduler.add_task([]() -> void { digitalWrite(PIN_BOARD_LED, !digitalRead(PIN_BOARD_LED)); },
-                       500ul,
-                       millis);
+    scheduler.add_task([]() -> void {
+        digitalToggle(PIN_BOARD_LED);
+        digitalToggle(PIN_LED);
+    }, 500ul, millis);
+#endif
+
+    // System: IWDG Timer
+#ifdef ENABLE_IWDT
+    IWatchdog.begin(WDT_INT_TIMEOUT);
 #endif
 }
 
@@ -276,9 +325,6 @@ void bno085_set_reports() {
 }
 
 void read_bno085() {
-#ifdef DEBUG_PRINT
-    Serial.println("Reading BNO085...");
-#endif
     if (bno085.wasReset()) bno085_set_reports();
     if (bno085.getSensorEvent(&bno085_values)) {
         switch (bno085_values.sensorId) {
@@ -293,9 +339,11 @@ void read_bno085() {
                 )) >> payload.eul_x >> payload.eul_y >> payload.eul_z;
                 break;
             case SH2_ACCELEROMETER:
-                tie(bno085_values.un.accelerometer.x,
-                    bno085_values.un.accelerometer.y,
-                    bno085_values.un.accelerometer.z) >> payload.acc_x >> payload.acc_y >> payload.acc_z;
+                tie(
+                        bno085_values.un.accelerometer.x,
+                        bno085_values.un.accelerometer.y,
+                        bno085_values.un.accelerometer.z
+                ) >> payload.acc_x >> payload.acc_y >> payload.acc_z;
             default:
                 break;
         }
@@ -311,19 +359,12 @@ void read_bno085() {
 }
 
 void read_bme280() {
-#ifdef DEBUG_PRINT
-    Serial.println("Reading BME280...");
-#endif
     payload.pressure_int = bme280.read_pressure();
     payload.humidity_int = bme280.read_humidity();
     payload.temperature_int = bme280.read_temperature_c();
 }
 
 void read_ms8607() {
-#ifdef DEBUG_PRINT
-    Serial.println("Reading MS8607...");
-#endif
-
     sensors_event_t sp;
     sensors_event_t st;
     sensors_event_t sh;
@@ -344,25 +385,16 @@ void read_ms8607() {
 }
 
 void read_ds18b20() {
-#ifdef DEBUG_PRINT
-    Serial.println("Reading DS18B20...");
-#endif
     ds18b20.requestTemperaturesByAddress(one_wire_addresses);
     payload.temperature_probe = ds18b20.getTempC(one_wire_addresses);
 }
 
 void read_mprls() {
-#ifdef DEBUG_PRINT
-    Serial.println("Reading MPRLS...");
-#endif
     payload.pressure_probe = mprls.readPressure();
     payload.altitude_probe = static_cast<float>(calc_altitude_approx_slow(payload.pressure_probe));
 }
 
 void read_m10s() {
-#ifdef DEBUG_PRINT
-    Serial.println("Reading M10S...");
-#endif
     if (m10s.getPVT()) {
         payload.gps_time = m10s.getUnixEpoch(payload.gps_time_us, UBLOX_CUSTOM_MAX_WAIT);
         payload.gps_siv = m10s.getSIV(UBLOX_CUSTOM_MAX_WAIT);
@@ -374,18 +406,6 @@ void read_m10s() {
 
 void construct_string() {
     payload.uptime = millis();
-
-    String valid_str;
-    valid_str.reserve(8);
-    valid_str += CONV_STR(valid.sd0);
-    valid_str += CONV_STR(valid.sd1);
-    valid_str += CONV_STR(valid.bme280);
-    valid_str += CONV_STR(valid.ms8607);
-    valid_str += CONV_STR(valid.ds18b20);
-    valid_str += CONV_STR(valid.mprls);
-    valid_str += CONV_STR(valid.bno085);
-    valid_str += CONV_STR(valid.m10s);
-
     build_string_to(payload_str,
                     payload.band_id,
                     payload.counter,
@@ -415,14 +435,6 @@ void construct_string() {
                     payload.altitude_probe,
                     payload.batt_volt
     );
-
-    cout << "Valid=" << valid_str
-         << ", Size=" << sizeof(payload)
-         << ", Length=" << payload_str.length()
-         << ", Free Mem=" << free_memory()
-         << ", Data=" << payload_str
-         << "\r\n";
-
     ++payload.counter;
 }
 
@@ -436,9 +448,37 @@ void write_sd1() {
     sd1_file.flush();
 }
 
+void write_usb() {
+    String valid_str;
+    valid_str.reserve(8);
+    valid_str += STR_REPR(valid.sd0);
+    valid_str += STR_REPR(valid.sd1);
+    valid_str += STR_REPR(valid.bme280);
+    valid_str += STR_REPR(valid.ms8607);
+    valid_str += STR_REPR(valid.ds18b20);
+    valid_str += STR_REPR(valid.mprls);
+    valid_str += STR_REPR(valid.bno085);
+    valid_str += STR_REPR(valid.m10s);
+
+    cout << "Valid=" << valid_str
+         << ", Size=" << sizeof(payload)
+         << ", Length=" << payload_str.length()
+         << ", Free Mem=" << free_memory()
+         << ", Data=" << payload_str
+         << "\r\n";
+}
+
 void write_comm() {
+#ifndef SIMPLE_RXTX
+    checksum_t checksum = calc_checksum<checksum_t>(payload);
+
+    SerialLoRa.write(START_SEQ, sizeof(START_SEQ));
+    SerialLoRa.write(reinterpret_cast<uint8_t *>(&checksum), sizeof(checksum));
     SerialLoRa.write(reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
+#else
     SerialLoRa.println(payload_str);
+//    i2cdetect(0, 127, Wire, SerialLoRa);
+#endif
 }
 
 void get_valid_altitude(float &altitude) {
@@ -474,56 +514,109 @@ void calculate_state() {
     }
 }
 
-void watch_and_list_sd() {
-    if (Serial.available()) {
-        delayMicroseconds(5000);
-        while (Serial.available()) static_cast<void>(Serial.read());
-        if (valid.sd0) {
-            Serial.println("SD0 Files");
-            list_files(sd0);
-        }
-        if (valid.sd1) {
-            Serial.println("SD1 Files");
-            list_files(sd1);
-        }
+void debug_prompt_handler(Stream &stream) {
+    if (!stream.available()) return;
+
+    uint8_t rx_cnt = 1;
+
+    // Read and wait on buffer
+    char c = static_cast<char>(stream.read());
+    delayMicroseconds(10ul * 1000ul);
+
+    // Clear remaining on buffer
+    while (stream.available()) {
+        c = (c == static_cast<char>(stream.read())) ? c : 'x';
+        ++rx_cnt;
+    }
+
+    // Cancel if rx_cnt is less than 5
+    if (rx_cnt < 5) return;
+
+    switch (c) {
+        case 's': // fall through
+        case 'S': // List SD card files
+            if (valid.sd0) {
+                stream.println("SD0 Files");
+                list_files(sd0);
+            }
+            if (valid.sd1) {
+                stream.println("SD1 Files");
+                list_files(sd1);
+            }
+            break;
+
+        case 'd': // fall through
+        case 'D': // Delete all files in all SD Card (All files will be lost!)
+            if (valid.sd0) delete_all_in(sd0);
+            if (valid.sd1) delete_all_in(sd1);
+            break;
+
+        case 'i': // fall through
+        case 'I': // List I2C devices on the bus
+            i2cdetect(0, 127, Wire, stream);
+            break;
+
+        case 'l': // fall through
+        case 'L': // Config LoRa module to the preset value
+            lora.config();
+            lora.set_param(0xffff,
+                           0,
+                           115200u,
+                           LoRaParity::PARITY_8N1,
+                           2400u,
+                           LORA_CHANNEL,
+                           240u,
+                           true);
+            delay(100u);
+            lora.begin(115200u);
+            break;
+
+        case 'r': // fall through
+        case 'R': // System Reset
+            NVIC_SystemReset();
+
+        case 'x':
+        case 'X':
+        default:
+            break;
     }
 }
 
-void i2cdetect(uint8_t first, uint8_t last) {
+void i2cdetect(uint8_t first, uint8_t last, TwoWire &wire, Stream &stream) {
     uint8_t resp;
     char buf[10];
 
-    Serial.print("   ");
+    stream.print("   ");
     for (uint8_t i = 0; i < 16; i++) {
         sprintf(buf, "%3x", i);
-        Serial.print(buf);
+        stream.print(buf);
     }
 
     for (uint8_t addr = 0; addr < 0x80; addr++) {
         if (addr % 16 == 0) {
             sprintf(buf, "\n%02x:", addr & 0xF0);
-            Serial.print(buf);
+            stream.print(buf);
         }
         if (addr >= first && addr <= last) {
-            Wire.beginTransmission(addr);
-            resp = Wire.endTransmission();
+            wire.beginTransmission(addr);
+            resp = wire.endTransmission();
             if (resp == 0) {
                 // device found
-                //Serial.printf(" %02x", addr);
+                //stream.printf(" %02x", addr);
                 sprintf(buf, " %02x", addr);
-                Serial.print(buf);
+                stream.print(buf);
             } else if (resp == 4) {
                 // other resp
-                Serial.print(" XX");
+                stream.print(" XX");
             } else {
                 // resp = 2: received NACK on transmit of addr
                 // resp = 3: received NACK on transmit of data
-                Serial.print(" --");
+                stream.print(" --");
             }
         } else {
             // addr not scanned
-            Serial.print("   ");
+            stream.print("   ");
         }
     }
-    Serial.println("\n");
+    stream.println("\n");
 }

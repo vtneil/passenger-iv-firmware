@@ -5,42 +5,67 @@
 #include "vt_serializer"
 #include "psg_4_definitions.h"
 
-//#define SIMPLE_RX
+//#define CONFIG_LORA
+
+#define FORWARD_COMM
 
 using namespace vt;
 
-HardwareSerial Serial1(PA_10, PA_9);
-HardwareSerial &SerialLoRa = Serial1;
-lora_e22 lora(SerialLoRa, 0, 0);
+//HardwareSerial Serial2(PA_3, PA_2);
+HardwareSerial &SerialLoRa = Serial2;
+lora_e22 lora(SerialLoRa, GCS_PIN_LORA_M0, GCS_PIN_LORA_M1);
 
-#ifndef SIMPLE_RX
-uint8_t payload_buf[sizeof(struct mcu0_data)];
+#ifndef SIMPLE_RXTX
+uint8_t payload_buf[sizeof(checksum_t) + sizeof(struct mcu0_data)];
 uint8_t compare_buf[sizeof(START_SEQ)];
 String payload_str;
 
 extern void add_to_buf(uint8_t, uint8_t *, size_t);
 
-extern void handle_data(const struct mcu0_data &);
+extern void handle_data(const struct mcu0_data &, const checksum_t &);
+
 #endif
 
 void setup() {
     // Enable onboard LED
     pinMode(PIN_BOARD_LED, OUTPUT);
+    digitalWrite(PIN_BOARD_LED, !HIGH);
 
     // USB CDC Serial
     Serial.begin();
 
-    // UARTs
+    // Intentional delay for exactly 1000 ms
+    delayMicroseconds(1000ul * 1000ul);
+
+    // Config LoRa
+#ifdef CONFIG_LORA
+    Serial.println("Beginning configuration mode...");
+    lora.config();
+    Serial.println("Entered configuration mode!");
+    lora.set_param(0xffff,
+                    0,
+                    115200u,
+                    LoRaParity::PARITY_8N1,
+                    2400u,
+                    LORA_CHANNEL,
+                    240u,
+                    true);
+    lora.query_param();
+    Serial.println("Done config!");
+    delay(100u);
+#endif
+
+    // LoRa
     lora.begin(115200u);
 
-#ifndef SIMPLE_RX
+#ifndef SIMPLE_RXTX
     // String Reserve
     payload_str.reserve(PAYLOAD_STR_MAX_LEN);
 #endif
 }
 
 void loop() {
-#ifndef SIMPLE_RX
+#ifndef SIMPLE_RXTX
     static size_t i = 0;
     static bool is_receiving = false;
 
@@ -49,9 +74,10 @@ void loop() {
 
         if (!is_receiving) {
             // Watch for start sequence.
-            if (i < sizeof(START_SEQ) && b == START_SEQ[i]) {
+            if (b == START_SEQ[i]) {
                 ++i;
                 if (i == sizeof(START_SEQ)) {
+                    // Reset Index, go to receive mode
                     i = 0;
                     is_receiving = true;
                 }
@@ -71,6 +97,7 @@ void loop() {
 
                 // Compare latest data with start sequence and reset if found.
                 if (0 == memcmp(START_SEQ, compare_buf, sizeof(START_SEQ))) {
+                    // Reset Index, go to start mode
                     i = 0;
                     is_receiving = false;
                 }
@@ -78,7 +105,20 @@ void loop() {
                 // Last index is met, use that data.
                 // Data might be invalid (CAREFUL!)
                 if (is_receiving && i == sizeof(struct mcu0_data)) {
-                    handle_data(serializer<struct mcu0_data>::deserialize(payload_buf));
+
+                    // Checksum
+                    checksum_t checksum_ref = *reinterpret_cast<checksum_t *>(payload_buf);
+                    checksum_t checksum_calc = calc_checksum<checksum_t>(
+                            *reinterpret_cast<struct mcu0_data *>(payload_buf + sizeof(checksum_t))
+                    );
+                    if (checksum_ref == checksum_calc) {
+                        handle_data(
+                                *reinterpret_cast<struct mcu0_data *>(payload_buf + sizeof(checksum_t)),
+                                checksum_ref
+                        );
+                    }
+
+                    // Reset Index, go to start mode
                     i = 0;
                     is_receiving = false;
                 }
@@ -88,15 +128,20 @@ void loop() {
 #else
     while (SerialLoRa.available()) Serial.write(SerialLoRa.read());
 #endif
+
+#ifdef FORWARD_COMM
+    while (Serial.available()) SerialLoRa.write(Serial.read());
+#endif
 }
 
-#ifndef SIMPLE_RX
+#ifndef SIMPLE_RXTX
+
 void add_to_buf(uint8_t b, uint8_t *buf, size_t n) {
     for (size_t i = 0; i < n - 1; ++i) buf[i] = buf[i + 1];
     buf[n - 1] = b;
 }
 
-inline void handle_data(const struct mcu0_data &payload) {
+inline void handle_data(const struct mcu0_data &payload, const checksum_t &checksum) {
     build_string_to(payload_str,
                     payload.band_id,
                     payload.counter,
@@ -127,7 +172,11 @@ inline void handle_data(const struct mcu0_data &payload) {
                     payload.batt_volt
     );
 
+    Serial.print("0x");
+    Serial.print(checksum, 16);
+    Serial.print(",");
     Serial.print(payload_str);
     Serial.print('\n');
 }
+
 #endif
