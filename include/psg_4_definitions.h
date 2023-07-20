@@ -6,8 +6,8 @@
 
 // Tool Macros
 #define STR_REPR(V) ((V) ? "#" : ".")
-#define DIV_ROUND_UP(X, Y) (1 + ((X - 1) / Y))
-#define DIV_ROUND(X, Y) (X / Y)
+#define DIV_CEIL(X, Y) (1 + ((X - 1) / Y))
+#define DIV_FLOOR(X, Y) (X / Y)
 #define MOD_OP(X, Y) (X % Y)
 
 // Target Altitude
@@ -16,7 +16,7 @@
 // Watchdog Timer Parameters
 #define WDT_INT_SAFE_MODE       (4000ul * 1000ul)
 #define WDT_INT_OPS_MODE        (2000ul * 1000ul)
-#define WDT_INT_TIMEOUT         WDT_INT_OPS_MODE
+#define WDT_INT_TIMEOUT         WDT_INT_SAFE_MODE
 #define WDT_INT_RELOAD          (WDT_INT_TIMEOUT / 2)
 
 // State Updates
@@ -118,7 +118,7 @@ using checksum_t = uint16_t;
 template<typename OutputType = uint8_t, typename InputType>
 OutputType calc_checksum(InputType &data) {
     using byte_t = uint8_t;
-    constexpr size_t q = DIV_ROUND(sizeof(InputType), sizeof(OutputType));
+    constexpr size_t q = DIV_FLOOR(sizeof(InputType), sizeof(OutputType));
     constexpr size_t r = MOD_OP(sizeof(InputType), sizeof(OutputType));
     OutputType *ptr = reinterpret_cast<OutputType *>(&data);
     OutputType chk = 0x0;

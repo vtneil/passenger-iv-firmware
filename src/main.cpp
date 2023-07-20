@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <IWatchdog.h>
+//#include <Servo.h>
 #include "SdFat.h"
 #include "SparkFun_u-blox_GNSS_v3.h"
 #include "Adafruit_Sensor.h"
@@ -27,7 +28,7 @@
  * Macros and Options
  */
 //#define DEBUG_PRINT
-#define ENABLE_IWDT
+//#define ENABLE_IWDT
 #define ENABLE_UPLINK
 #define BLINK_STATUS
 //#define CONFIG_LORA
@@ -131,6 +132,8 @@ task_scheduler<20> scheduler;
 /*
  * Functions
  */
+extern void blink_leds();
+
 extern void bno085_set_reports();
 
 extern void read_bno085();
@@ -212,7 +215,7 @@ void setup() {
         open_for_append(sd1, sd1_file, sd1_filename);
     }
 
-    // Intentional delay for exactly 1000 ms
+    // Intentional delay for exactly 200 ms
     delayMicroseconds(1000ul * 1000ul);
 
     // I2Cs
@@ -255,13 +258,6 @@ void setup() {
         payload.batt_volt = analogRead(PIN_VBATT);
     }, 1000ul, millis);
 
-    // WDT reloader task (1)
-#ifdef ENABLE_IWDT
-    scheduler.add_task([]() -> void {
-        IWatchdog.reload();
-    }, WDT_INT_RELOAD, micros);
-#endif
-
     // Sensor reading tasks (6)
     scheduler
             .add_task(read_bme280, 100ul, millis, valid.bme280)
@@ -287,10 +283,10 @@ void setup() {
     scheduler
             .add_task([]() -> void {
                 debug_prompt_handler(Serial);
-            }, 250ul, millis)
+            }, 100ul, millis)
             .add_task([]() -> void {
                 debug_prompt_handler(SerialLoRa);
-            }, 250ul, millis);
+            }, 100ul, millis);
 #endif
 
     payload.band_id = 0;  // Set ID to main device
@@ -305,19 +301,24 @@ void setup() {
 
     // LED Blink during operation (1)
 #ifdef BLINK_STATUS
-    scheduler.add_task([]() -> void {
-        digitalToggle(PIN_BOARD_LED);
-        digitalToggle(PIN_LED);
-    }, 500ul, millis);
+    scheduler.add_task(blink_leds, 250ul, millis);
 #endif
 
     // System: IWDG Timer
 #ifdef ENABLE_IWDT
+    scheduler.add_task([]() -> void {
+        IWatchdog.reload();
+    }, WDT_INT_RELOAD, micros);
     IWatchdog.begin(WDT_INT_TIMEOUT);
 #endif
 }
 
 void loop() { scheduler.exec(); }  // Run tasks only! Should not add anything. Long delay is prohibited.
+
+void blink_leds() {
+    digitalToggle(PIN_BOARD_LED);
+    digitalToggle(PIN_LED);
+}
 
 void bno085_set_reports() {
     bno085.enableReport(SH2_ROTATION_VECTOR, BNO085_UPDATE_INTERVAL_US);
@@ -533,6 +534,26 @@ void debug_prompt_handler(Stream &stream) {
     if (rx_cnt < 5) return;
 
     switch (c) {
+        case '0': // Turn "off" LEDs toggling and LEDs
+            scheduler.disable(blink_leds);
+            digitalWrite(PIN_BOARD_LED, !LOW);
+            digitalWrite(PIN_LED, LOW);
+            break;
+
+        case '1': // Turn "on" LEDs toggling
+            scheduler.enable(blink_leds);
+            break;
+
+        case '2': // Turn "on" static LEDs
+            scheduler.disable(blink_leds);
+            digitalWrite(PIN_BOARD_LED, !HIGH);
+            digitalWrite(PIN_LED, HIGH);
+            break;
+
+        case 'c': // fall through
+        case 'C': // Balloon separation command todo
+            break;
+
         case 's': // fall through
         case 'S': // List SD card files
             if (valid.sd0) {

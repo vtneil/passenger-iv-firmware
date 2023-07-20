@@ -2,7 +2,6 @@
 #include <Arduino.h>
 #include "vt_tools"
 #include "vt_lora"
-#include "vt_serializer"
 #include "psg_4_definitions.h"
 
 //#define CONFIG_LORA
@@ -19,6 +18,8 @@ lora_e22 lora(SerialLoRa, GCS_PIN_LORA_M0, GCS_PIN_LORA_M1);
 uint8_t payload_buf[sizeof(checksum_t) + sizeof(struct mcu0_data)];
 uint8_t compare_buf[sizeof(START_SEQ)];
 String payload_str;
+
+task_scheduler<1> scheduler;
 
 extern void add_to_buf(uint8_t, uint8_t *, size_t);
 
@@ -62,6 +63,8 @@ void setup() {
     // String Reserve
     payload_str.reserve(PAYLOAD_STR_MAX_LEN);
 #endif
+
+    scheduler.add_task([]() -> void { digitalToggle(PIN_BOARD_LED); }, 1000u, millis);
 }
 
 void loop() {
@@ -70,6 +73,8 @@ void loop() {
     static bool is_receiving = false;
 
     while (SerialLoRa.available()) {
+        digitalToggle(PIN_BOARD_LED);
+
         uint8_t b = SerialLoRa.read();
 
         if (!is_receiving) {
@@ -132,6 +137,8 @@ void loop() {
 #ifdef FORWARD_COMM
     while (Serial.available()) SerialLoRa.write(Serial.read());
 #endif
+
+    scheduler.exec();
 }
 
 #ifndef SIMPLE_RXTX
