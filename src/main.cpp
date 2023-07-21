@@ -44,21 +44,6 @@ using namespace vt;
 constexpr uint32_t BNO085_UPDATE_INTERVAL_US = 10ul * 1000ul;  // 10,000 us
 constexpr uint32_t BNO085_POLLING_INTERVAL = 10ul * 1000ul;    // ms * 1000 -> us
 
-constexpr real_t dt = static_cast<real_t>(BNO085_POLLING_INTERVAL) * 0.001 * 0.001;
-constexpr real_t d2t = integral_coefficient<1>() * (dt * dt);
-constexpr real_t d3t = integral_coefficient<2>() * (dt * dt * dt);
-constexpr real_t base_noise_value = 0.900;
-
-constexpr numeric_matrix<4, 4> FCJ = make_numeric_matrix({{1, dt, d2t, d3t},
-                                                          {0, 1,  dt,  d2t},
-                                                          {0, 0,  1,   dt},
-                                                          {0, 0,  0,   1}});
-constexpr numeric_matrix<4, 1> BCJ;
-constexpr numeric_matrix<1, 4> HCJ = make_numeric_matrix({{1, 0, 0, 0}});
-constexpr numeric_matrix<4, 4> QCJ = numeric_matrix<4, 4>::diagonals(base_noise_value);
-constexpr numeric_matrix<1, 1> RCJ = numeric_matrix<1, 1>::diagonals(base_noise_value);
-constexpr numeric_vector<4> x0;
-
 /*
  * System
  */
@@ -85,6 +70,21 @@ arduino_iostream cout(Serial);
  * Kalman Filters
  */
 struct kf_s {
+    static constexpr real_t dt = static_cast<real_t>(BNO085_POLLING_INTERVAL) * 0.001 * 0.001;
+    static constexpr real_t d2t = integral_coefficient<1>() * (dt * dt);
+    static constexpr real_t d3t = integral_coefficient<2>() * (dt * dt * dt);
+    static constexpr real_t base_noise_value = 0.900;
+
+    static constexpr numeric_matrix<4, 4> FCJ = make_numeric_matrix({{1, dt, d2t, d3t},
+                                                                     {0, 1,  dt,  d2t},
+                                                                     {0, 0,  1,   dt},
+                                                                     {0, 0,  0,   1}});
+    static constexpr numeric_matrix<4, 1> BCJ = {};
+    static constexpr numeric_matrix<1, 4> HCJ = make_numeric_matrix({{1, 0, 0, 0}});
+    static constexpr numeric_matrix<4, 4> QCJ = numeric_matrix<4, 4>::diagonals(base_noise_value);
+    static constexpr numeric_matrix<1, 1> RCJ = numeric_matrix<1, 1>::diagonals(base_noise_value);
+    static constexpr numeric_vector<4> x0 = {};
+
     struct {
         kalman_filter_t<4, 1, 1> x{FCJ, BCJ, HCJ, QCJ, RCJ, x0};
         kalman_filter_t<4, 1, 1> y{FCJ, BCJ, HCJ, QCJ, RCJ, x0};
@@ -103,6 +103,7 @@ struct kf_s {
  */
 struct mcu0_data payload;
 String payload_str;
+checksum_t checksum;
 
 struct peripherals {
     bool sd0;
@@ -122,7 +123,6 @@ Adafruit_MS8607 ms8607;             // External: MS8607
 DallasTemperature ds18b20;          // External: DS18B20
 Adafruit_MPRLS mprls;               // Probe   : MPRLS
 Adafruit_BNO08x bno085;             // Internal: BNO08x
-sh2_SensorValue_t bno085_values;    // (BNO085 data)
 
 /*
  * Smart delayers and Scheduler
@@ -133,6 +133,8 @@ task_scheduler<20> scheduler;
  * Functions
  */
 extern void blink_leds();
+
+extern void config_lora();
 
 extern void bno085_set_reports();
 
@@ -168,6 +170,10 @@ void setup() {
 #ifdef ENABLE_IWDT
     static_cast<void>(IWatchdog.isReset(true));
 #endif
+    // Device Presets
+    payload.band_id = 0;  // Set ID to main device
+    payload.state = state_t::INVALIDATE;
+    payload_str.reserve(PAYLOAD_STR_MAX_LEN);
 
     // Enable onboard LED
     pinMode(PIN_BOARD_LED, OUTPUT);
@@ -185,20 +191,7 @@ void setup() {
 
     // Config LoRa
 #ifdef CONFIG_LORA
-    Serial.println("Beginning configuration mode...");
-    lora.config();
-    Serial.println("Entered configuration mode!");
-    lora.set_param(0xffff,
-                    0,
-                    115200u,
-                    LoRaParity::PARITY_8N1,
-                    2400u,
-                    LORA_CHANNEL,
-                    240u,
-                    true);
-    lora.query_param();
-    Serial.println("Done config!");
-    delay(100u);
+    config_lora();
 #endif
 
     // SPI SD0 (Internal Flash)
@@ -259,20 +252,22 @@ void setup() {
     }, 1000ul, millis);
 
     // Sensor reading tasks (6)
+#ifdef ENABLE_SENSORS
     scheduler
             .add_task(read_bme280, 100ul, millis, valid.bme280)
-            .add_task(read_ms8607, 200ul, millis, valid.ms8607)
+            .add_task(read_ms8607, 100ul, millis, valid.ms8607)
             .add_task(read_mprls, 200ul, millis, valid.mprls)
             .add_task(read_m10s, 500ul, millis, valid.m10s)
             .add_task(read_bno085, 100ul * 1000ul, micros, valid.bno085)
             .add_task(read_ds18b20, 1000ul, millis, valid.ds18b20);
+#endif
 
     // Data construction and communication tasks (5)
     scheduler
             .add_task(construct_string, 100ul, millis)
-            .add_task(write_comm, 2000ul, millis)
-            .add_task(write_usb, 1000ul, millis)
-            .add_task(write_sd0, 500ul, millis, valid.sd0)
+            .add_task(write_comm, COMM_INT_LORA, millis)
+            .add_task(write_usb, COMM_INT_USB, millis)
+            .add_task(write_sd0, 100ul, millis, valid.sd0)
             .add_task(write_sd1, 100ul, millis, valid.sd1);
 
     // State calculation (1)
@@ -288,9 +283,6 @@ void setup() {
                 debug_prompt_handler(SerialLoRa);
             }, 100ul, millis);
 #endif
-
-    payload.band_id = 0;  // Set ID to main device
-    payload_str.reserve(PAYLOAD_STR_MAX_LEN);
 
     // UARTs
     lora.begin(115200u);
@@ -320,12 +312,28 @@ void blink_leds() {
     digitalToggle(PIN_LED);
 }
 
+void config_lora() {
+    lora.config();
+    lora.set_param(0xffff,
+                   0,
+                   115200u,
+                   LoRaParity::PARITY_8N1,
+                   2400u,
+                   LORA_CHANNEL,
+                   240u,
+                   true);
+    delay(100u);
+    lora.begin(115200u);
+}
+
 void bno085_set_reports() {
     bno085.enableReport(SH2_ROTATION_VECTOR, BNO085_UPDATE_INTERVAL_US);
     bno085.enableReport(SH2_ACCELEROMETER, BNO085_UPDATE_INTERVAL_US);
 }
 
 void read_bno085() {
+    static sh2_SensorValue_t bno085_values;
+
     if (bno085.wasReset()) bno085_set_reports();
     if (bno085.getSensorEvent(&bno085_values)) {
         switch (bno085_values.sensorId) {
@@ -366,22 +374,13 @@ void read_bme280() {
 }
 
 void read_ms8607() {
-    sensors_event_t sp;
-    sensors_event_t st;
-    sensors_event_t sh;
+    static sensors_event_t sp;
+    static sensors_event_t st;
+    static sensors_event_t sh;
     ms8607.getEvent(&sp, &st, &sh);
     payload.pressure_ext = sp.pressure;
     payload.temperature_ext = st.temperature;
     payload.humidity_ext = sh.relative_humidity;
-
-//    sensors_event_t sensors_event;
-//    ms8607.getEvent(&sensors_event, nullptr, nullptr);
-//    payload.pressure_ext = sensors_event.pressure;
-//    ms8607.getEvent(nullptr, &sensors_event, nullptr);
-//    payload.temperature_ext = sensors_event.temperature;
-//    ms8607.getEvent(nullptr, nullptr, &sensors_event);
-//    payload.humidity_ext = sensors_event.relative_humidity;
-
     payload.altitude_ext = static_cast<float>(calc_altitude_approx_slow(payload.pressure_ext));
 }
 
@@ -410,11 +409,11 @@ void construct_string() {
     build_string_to(payload_str,
                     payload.band_id,
                     payload.counter,
-                    payload.state,
                     payload.uptime,
+                    eval_state(payload.state),
+                    payload.gps_siv,
                     payload.gps_time,
                     payload.gps_time_us,
-                    payload.gps_siv,
                     String(payload.gps_latitude, 8),
                     String(payload.gps_longitude, 8),
                     payload.gps_altitude,
@@ -450,8 +449,10 @@ void write_sd1() {
 }
 
 void write_usb() {
-    String valid_str;
+    static String valid_str;
     valid_str.reserve(8);
+
+    valid_str = "";
     valid_str += STR_REPR(valid.sd0);
     valid_str += STR_REPR(valid.sd1);
     valid_str += STR_REPR(valid.bme280);
@@ -460,6 +461,13 @@ void write_usb() {
     valid_str += STR_REPR(valid.mprls);
     valid_str += STR_REPR(valid.bno085);
     valid_str += STR_REPR(valid.m10s);
+
+//    cout << "Core, HCLK, APB1, APB2 = "
+//         << SystemCoreClock << ' '
+//         << HAL_RCC_GetHCLKFreq() << ' '
+//         << HAL_RCC_GetPCLK1Freq() << ' '
+//         << HAL_RCC_GetPCLK2Freq() << ' '
+//         << "\r\n";
 
     cout << "Valid=" << valid_str
          << ", Size=" << sizeof(payload)
@@ -471,8 +479,7 @@ void write_usb() {
 
 void write_comm() {
 #ifndef SIMPLE_RXTX
-    checksum_t checksum = calc_checksum<checksum_t>(payload);
-
+    checksum = calc_checksum<checksum_t>(payload);
     SerialLoRa.write(START_SEQ, sizeof(START_SEQ));
     SerialLoRa.write(reinterpret_cast<uint8_t *>(&checksum), sizeof(checksum));
     SerialLoRa.write(reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
@@ -483,34 +490,71 @@ void write_comm() {
 }
 
 void get_valid_altitude(float &altitude) {
-    if (validate_altitude(payload.gps_altitude)) altitude = payload.gps_altitude;
-    if (validate_altitude(payload.altitude_ext)) altitude = payload.altitude_ext;
+    static in_place_buffer<float, 5> gps_alts;
 
-    // Default altitude from pressure port sensor, inaccurate but wouldn't die.
+    while (!gps_alts.push(payload.gps_altitude));
+
+    if (gps_alts.average() != payload.gps_altitude && validate_altitude(payload.gps_altitude))
+        altitude = payload.gps_altitude;
+    if (validate_altitude(payload.altitude_ext))
+        altitude = payload.altitude_ext;
+
+    // Default altitude from pressure port sensor, inaccurate but wouldn't die, right?
     altitude = payload.altitude_probe;
 }
 
 void calculate_state() {
-    static float curr_alt;
-    get_valid_altitude(curr_alt);
+    static in_place_buffer<float, STATE_SAMPLE_CNT> alts;
+    static float max_alt;
+    get_valid_altitude(payload.altitude_valid);
+    if (payload.altitude_valid > max_alt) max_alt = payload.altitude_valid;
+    if (!alts.push(payload.altitude_valid)) return;
 
-    switch (static_cast<GlobalState>(payload.state)) {
-        case GlobalState::PREPARATION:
-            payload.state = static_cast<uint8_t>(GlobalState::AIRBORNE_READY);
+    float alt_avg = alts.average();
+
+    switch (static_cast<state_t>(payload.state)) {
+        case state_t::PREPARATION:  // 0
+            // Always
+            payload.state = state_t::AIRBORNE_READY;
             return;
-        case GlobalState::AIRBORNE_READY:
+        case state_t::AIRBORNE_READY:  // 1
+            if (alt_avg > HALF_BURST_ALTITUDE)
+                payload.state = state_t::ASCENT_TO_MAX;
+            else if (alt_avg > FLOOR_ALTITUDE)
+                payload.state = state_t::ASCENT_TO_HALF;
             return;
-        case GlobalState::ASCENT_SUB_HALF:
+        case state_t::ASCENT_TO_HALF:  // 2
+            if (alt_avg > HALF_BURST_ALTITUDE)
+                payload.state = state_t::ASCENT_TO_MAX;
             return;
-        case GlobalState::ASCENT_SUB_MAX:
+        case state_t::ASCENT_TO_MAX:  // 3
+            if (alts.count_if(compare_max, max_alt) > STATE_SAMPLE_CNT * 7 / 10)
+                payload.state = state_t::DESCENT;
             return;
-        case GlobalState::DESCENT:
+        case state_t::DESCENT:  // 4
+            if (alt_avg < 500)
+                payload.state = state_t::DESCENT_ENB_CELL;
             return;
-        case GlobalState::DESCENT_ENB_CELL:
+        case state_t::DESCENT_ENB_CELL:  // 5
+            if (alts.count_if(compare_dv, alt_avg, 1.f) > STATE_SAMPLE_CNT / 2)
+                payload.state = state_t::LANDED_FIXED;
             return;
-        case GlobalState::LANDED_FIXED:
+        case state_t::LANDED_FIXED: { // 6
+            // Accepting state, reset the MCU to restart the process
+            static bool triggered = false;
+            if (!triggered) {
+                scheduler.get_task(write_comm) = task_t(write_comm, 2 * COMM_INT_LORA, millis);
+                triggered = true;
+            }
             return;
-        case GlobalState::INVALIDATE:
+        }
+        case state_t::INVALIDATE:  // 255 (entry)
+            if (alt_avg <= FLOOR_ALTITUDE)
+                payload.state = state_t::PREPARATION;
+            else if (alt_avg <= HALF_BURST_ALTITUDE)
+                payload.state = state_t::ASCENT_TO_HALF;
+            else
+                payload.state = state_t::ASCENT_TO_MAX;
             return;
     }
 }
@@ -526,7 +570,7 @@ void debug_prompt_handler(Stream &stream) {
 
     // Clear remaining on buffer
     while (stream.available()) {
-        c = (c == static_cast<char>(stream.read())) ? c : 'x';
+        if (c != static_cast<char>(stream.read())) return;
         ++rx_cnt;
     }
 
@@ -548,6 +592,18 @@ void debug_prompt_handler(Stream &stream) {
             scheduler.disable(blink_leds);
             digitalWrite(PIN_BOARD_LED, !HIGH);
             digitalWrite(PIN_LED, HIGH);
+            break;
+
+        case '3': // set LoRa interval at half interval
+            scheduler.get_task(write_comm) = task_t(write_comm, COMM_INT_LORA / 2, millis);
+            break;
+
+        case '4': // set LoRa interval at full interval
+            scheduler.get_task(write_comm) = task_t(write_comm, COMM_INT_LORA, millis);
+            break;
+
+        case '5': // set LoRa interval at double interval
+            scheduler.get_task(write_comm) = task_t(write_comm, 2 * COMM_INT_LORA, millis);
             break;
 
         case 'c': // fall through
@@ -579,17 +635,7 @@ void debug_prompt_handler(Stream &stream) {
 
         case 'l': // fall through
         case 'L': // Config LoRa module to the preset value
-            lora.config();
-            lora.set_param(0xffff,
-                           0,
-                           115200u,
-                           LoRaParity::PARITY_8N1,
-                           2400u,
-                           LORA_CHANNEL,
-                           240u,
-                           true);
-            delay(100u);
-            lora.begin(115200u);
+            config_lora();
             break;
 
         case 'r': // fall through
@@ -604,8 +650,8 @@ void debug_prompt_handler(Stream &stream) {
 }
 
 void i2cdetect(uint8_t first, uint8_t last, TwoWire &wire, Stream &stream) {
-    uint8_t resp;
-    char buf[10];
+    static uint8_t resp;
+    static char buf[10];
 
     stream.print("   ");
     for (uint8_t i = 0; i < 16; i++) {

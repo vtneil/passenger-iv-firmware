@@ -30,3 +30,11 @@ float calc_rate(const float &val_now, float &val_prev, size_t dt) {
     val_prev = val_now;
     return rate;
 }
+
+bool compare_max(float val, float val_max) {
+    return val < val_max;
+}
+
+bool compare_dv(float val, float val_ref, float dv) {
+    return abs(val_ref - val) < dv;
+}

@@ -18,6 +18,7 @@ lora_e22 lora(SerialLoRa, GCS_PIN_LORA_M0, GCS_PIN_LORA_M1);
 uint8_t payload_buf[sizeof(checksum_t) + sizeof(struct mcu0_data)];
 uint8_t compare_buf[sizeof(START_SEQ)];
 String payload_str;
+checksum_t checksum_calc;
 
 task_scheduler<1> scheduler;
 
@@ -71,11 +72,13 @@ void loop() {
 #ifndef SIMPLE_RXTX
     static size_t i = 0;
     static bool is_receiving = false;
+    uint8_t b;
+    static checksum_t checksum_ref;
 
     while (SerialLoRa.available()) {
         digitalToggle(PIN_BOARD_LED);
 
-        uint8_t b = SerialLoRa.read();
+        b = SerialLoRa.read();
 
         if (!is_receiving) {
             // Watch for start sequence.
@@ -112,9 +115,10 @@ void loop() {
                 if (is_receiving && i == sizeof(struct mcu0_data)) {
 
                     // Checksum
-                    checksum_t checksum_ref = *reinterpret_cast<checksum_t *>(payload_buf);
-                    checksum_t checksum_calc = calc_checksum<checksum_t>(
-                            *reinterpret_cast<struct mcu0_data *>(payload_buf + sizeof(checksum_t))
+                    checksum_ref = *reinterpret_cast<checksum_t *>(payload_buf);
+                    calc_checksum<checksum_t>(
+                            *reinterpret_cast<struct mcu0_data *>(payload_buf + sizeof(checksum_t)),
+                            checksum_calc
                     );
                     if (checksum_ref == checksum_calc) {
                         handle_data(
@@ -149,14 +153,16 @@ void add_to_buf(uint8_t b, uint8_t *buf, size_t n) {
 }
 
 inline void handle_data(const struct mcu0_data &payload, const checksum_t &checksum) {
+    static char buf[2 + (2 * sizeof(checksum_t)) + 1] = "";
+
     build_string_to(payload_str,
                     payload.band_id,
                     payload.counter,
-                    payload.state,
                     payload.uptime,
+                    eval_state(payload.state),
+                    payload.gps_siv,
                     payload.gps_time,
                     payload.gps_time_us,
-                    payload.gps_siv,
                     String(payload.gps_latitude, 8),
                     String(payload.gps_longitude, 8),
                     payload.gps_altitude,
@@ -179,8 +185,21 @@ inline void handle_data(const struct mcu0_data &payload, const checksum_t &check
                     payload.batt_volt
     );
 
-    Serial.print("0x");
-    Serial.print(checksum, 16);
+    switch (sizeof(checksum_t)) {
+        case 1:
+            snprintf(buf, sizeof(buf), "0x%02X", checksum);
+            break;
+        case 2:
+            snprintf(buf, sizeof(buf), "0x%04X", checksum);
+            break;
+        case 4:
+            snprintf(buf, sizeof(buf), "0x%08X", checksum);
+            break;
+        case 8:
+            snprintf(buf, sizeof(buf), "0x%016X", checksum);
+            break;
+    }
+    Serial.print(buf);
     Serial.print(",");
     Serial.print(payload_str);
     Serial.print('\n');
