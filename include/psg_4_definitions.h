@@ -5,13 +5,16 @@
 #define USE_HSE
 #define CLOCK_SPEED_SETTINGS    100
 #define ENABLE_SENSORS
+#define SPEED_MUL               1
+#define SPEED_DIV               1
 //#define SIMPLE_RXTX
 
 // Tool Macros
+#define SET_INT(X)              (SPEED_DIV * (X) / SPEED_MUL)
 #define STR_REPR(V)             ((V) ? "#" : ".")
-#define DIV_CEIL(X, Y)          (1 + ((X - 1) / Y))
-#define DIV_FLOOR(X, Y)         (X / Y)
-#define MOD_OP(X, Y)            (X % Y)
+#define DIV_CEIL(X, Y)          (1 + (((X) - 1) / (Y)))
+#define DIV_FLOOR(X, Y)         ((X) / (Y))
+#define MOD_OP(X, Y)            ((X) % (Y))
 
 // Target Altitude
 #define FLOOR_ALTITUDE          (250.f)
@@ -58,6 +61,14 @@
 
 #define EXT_TEMP_PIN            PA8
 
+// Pin Macros
+#define LED_ON()                digitalWrite(PIN_BOARD_LED, 0); \
+                                digitalWrite(PIN_LED, 1)
+#define LED_OFF()               digitalWrite(PIN_BOARD_LED, 1); \
+                                digitalWrite(PIN_LED, 0)
+#define LED_TOGGLE()            digitalToggle(PIN_BOARD_LED); \
+                                digitalToggle(PIN_LED)
+
 // Other parameters
 #define UBLOX_CUSTOM_MAX_WAIT   (250u)
 #define BME280_ADDRESS          (0x77)
@@ -66,6 +77,8 @@
 #define I2C_CLOCK_FAST          (400000u)
 #define I2C_CLOCK_FAST_PLUS     (1000000u)
 #define I2C_CLOCK_HIGH_SPEED    (3400000u)
+
+#define I2C_CLOCK_SPEED         (I2C_CLOCK_STANDARD)
 
 // MCU Data
 #define PAYLOAD_STR_MAX_LEN     (256u)
@@ -79,7 +92,7 @@ enum class state_t : uint8_t {
     DESCENT,
     DESCENT_ENB_CELL,
     LANDED_FIXED,
-    INVALIDATE = 255
+    INVALID = 255
 };
 
 uint8_t eval_state(state_t state) {
@@ -93,8 +106,9 @@ state_t eval_state(uint8_t state) {
 struct mcu0_data {
     uint8_t band_id;
     uint32_t counter;
-    uint32_t uptime;
+    uint32_t uptime_ms;
     state_t state;
+    char last_response;
 
     uint8_t gps_siv;
     uint32_t gps_time;
@@ -127,8 +141,9 @@ struct mcu0_data {
     uint32_t batt_volt;
 };
 
-// Transmission Sequences
-constexpr uint8_t START_SEQ[4] = {0xff, 0xff, 0xff, 0xff};
+// Transmission Sequences (each byte must not overlap)
+constexpr uint8_t START_SEQ_DAT[4] = {0xff, 0xff, 0xff, 0xff};
+constexpr uint8_t START_SEQ_CMD[4] = {0xee, 0xee, 0xee, 0xee};
 
 // Checksum type: uint8_t (1 byte), uint16_t (2 byte), uint32_t (4 byte), or uint64_t (8 byte)
 using checksum_t = uint64_t;

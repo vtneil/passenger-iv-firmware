@@ -172,16 +172,22 @@ void setup() {
 #endif
     // Device Presets
     payload.band_id = 0;  // Set ID to main device
-    payload.state = state_t::INVALIDATE;
+    payload.state = state_t::INVALID;
+    payload.last_response = 'x';
     payload_str.reserve(PAYLOAD_STR_MAX_LEN);
 
     // Enable onboard LED
     pinMode(PIN_BOARD_LED, OUTPUT);
-    digitalWrite(PIN_BOARD_LED, !HIGH);
 
     // Enable external LED
     pinMode(PIN_LED, OUTPUT);
-    digitalWrite(PIN_LED, HIGH);
+
+    // Turn on all LEDs
+    LED_ON();
+
+    // Setup Servo Pin
+    pinMode(PIN_CTRL_CUT, OUTPUT);
+    digitalWrite(PIN_CTRL_CUT, LOW);
 
     // USB CDC Serial
     Serial.begin();
@@ -214,7 +220,7 @@ void setup() {
     // I2Cs
     Wire.setSCL(PIN_I2C_SCL1);
     Wire.setSDA(PIN_I2C_SDA1);
-    Wire.setClock(I2C_CLOCK_STANDARD);
+    Wire.setClock(I2C_CLOCK_SPEED);
     Wire.begin();
 
     // BME280 (0x77)
@@ -249,68 +255,64 @@ void setup() {
     // Battery Voltage Readings (1)
     scheduler.add_task([]() -> void {
         payload.batt_volt = analogRead(PIN_VBATT);
-    }, 1000ul, millis);
+    }, SET_INT(1000ul), millis);
 
     // Sensor reading tasks (6)
 #ifdef ENABLE_SENSORS
     scheduler
-            .add_task(read_bme280, 100ul, millis, valid.bme280)
-            .add_task(read_ms8607, 100ul, millis, valid.ms8607)
-            .add_task(read_mprls, 200ul, millis, valid.mprls)
-            .add_task(read_m10s, 500ul, millis, valid.m10s)
-            .add_task(read_bno085, 100ul * 1000ul, micros, valid.bno085)
-            .add_task(read_ds18b20, 1000ul, millis, valid.ds18b20);
+            .add_task(read_bme280, SET_INT(100ul), millis, valid.bme280)
+            .add_task(read_ms8607, SET_INT(100ul), millis, valid.ms8607)
+            .add_task(read_mprls, SET_INT(200ul), millis, valid.mprls)
+            .add_task(read_m10s, SET_INT(500ul), millis, valid.m10s)
+            .add_task(read_bno085, SET_INT(100ul * 1000ul), micros, valid.bno085)
+            .add_task(read_ds18b20, SET_INT(1000ul), millis, valid.ds18b20);
 #endif
 
     // Data construction and communication tasks (5)
     scheduler
-            .add_task(construct_string, 100ul, millis)
-            .add_task(write_comm, COMM_INT_LORA, millis)
-            .add_task(write_usb, COMM_INT_USB, millis)
-            .add_task(write_sd0, 100ul, millis, valid.sd0)
-            .add_task(write_sd1, 100ul, millis, valid.sd1);
+            .add_task(construct_string, SET_INT(100ul), millis)
+            .add_task(write_comm, SET_INT(COMM_INT_LORA), millis)
+            .add_task(write_usb, SET_INT(COMM_INT_USB), millis)
+            .add_task(write_sd0, SET_INT(100ul), millis, valid.sd0)
+            .add_task(write_sd1, SET_INT(100ul), millis, valid.sd1);
 
     // State calculation (1)
-    scheduler.add_task(calculate_state, STATE_INT_UPDATE, millis);
+    scheduler.add_task(calculate_state, SET_INT(STATE_INT_UPDATE), millis);
 
     // Debug from Uplink and USB (2)
 #ifdef ENABLE_UPLINK
     scheduler
             .add_task([]() -> void {
                 debug_prompt_handler(Serial);
-            }, 100ul, millis)
+            }, SET_INT(100ul), millis)
             .add_task([]() -> void {
                 debug_prompt_handler(SerialLoRa);
-            }, 100ul, millis);
+            }, SET_INT(100ul), millis);
 #endif
 
     // UARTs
     lora.begin(115200u);
 
     // Turn off all LEDs
-    digitalWrite(PIN_BOARD_LED, !LOW);
-    digitalWrite(PIN_LED, LOW);
+    LED_OFF();
 
     // LED Blink during operation (1)
 #ifdef BLINK_STATUS
-    scheduler.add_task(blink_leds, 250ul, millis);
+    scheduler.add_task(blink_leds, SET_INT(250ul), millis);
 #endif
 
     // System: IWDG Timer
 #ifdef ENABLE_IWDT
     scheduler.add_task([]() -> void {
         IWatchdog.reload();
-    }, WDT_INT_RELOAD, micros);
-    IWatchdog.begin(WDT_INT_TIMEOUT);
+    }, SET_INT(WDT_INT_RELOAD), micros);
+    IWatchdog.begin(SET_INT(WDT_INT_TIMEOUT));
 #endif
 }
 
 void loop() { scheduler.exec(); }  // Run tasks only! Should not add anything. Long delay is prohibited.
 
-void blink_leds() {
-    digitalToggle(PIN_BOARD_LED);
-    digitalToggle(PIN_LED);
-}
+void blink_leds() { LED_TOGGLE(); }
 
 void config_lora() {
     lora.config();
@@ -405,12 +407,13 @@ void read_m10s() {
 }
 
 void construct_string() {
-    payload.uptime = millis();
+    payload.uptime_ms = millis();
     build_string_to(payload_str,
                     payload.band_id,
                     payload.counter,
-                    payload.uptime,
+                    payload.uptime_ms,
                     eval_state(payload.state),
+                    payload.last_response,
                     payload.gps_siv,
                     payload.gps_time,
                     payload.gps_time_us,
@@ -480,12 +483,11 @@ void write_usb() {
 void write_comm() {
 #ifndef SIMPLE_RXTX
     checksum = calc_checksum<checksum_t>(payload);
-    SerialLoRa.write(START_SEQ, sizeof(START_SEQ));
+    SerialLoRa.write(START_SEQ_DAT, sizeof(START_SEQ_DAT));
     SerialLoRa.write(reinterpret_cast<uint8_t *>(&checksum), sizeof(checksum));
     SerialLoRa.write(reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
 #else
     SerialLoRa.println(payload_str);
-//    i2cdetect(0, 127, Wire, SerialLoRa);
 #endif
 }
 
@@ -514,48 +516,55 @@ void calculate_state() {
 
     switch (static_cast<state_t>(payload.state)) {
         case state_t::PREPARATION:  // 0
-            // Always
+            // Always transfer to AIRBORNE_READY
             payload.state = state_t::AIRBORNE_READY;
-            return;
+            break;
+
         case state_t::AIRBORNE_READY:  // 1
             if (alt_avg > HALF_BURST_ALTITUDE)
                 payload.state = state_t::ASCENT_TO_MAX;
             else if (alt_avg > FLOOR_ALTITUDE)
                 payload.state = state_t::ASCENT_TO_HALF;
-            return;
+            break;
+
         case state_t::ASCENT_TO_HALF:  // 2
             if (alt_avg > HALF_BURST_ALTITUDE)
                 payload.state = state_t::ASCENT_TO_MAX;
-            return;
+            break;
+
         case state_t::ASCENT_TO_MAX:  // 3
             if (alts.count_if(compare_max, max_alt) > STATE_SAMPLE_CNT * 7 / 10)
                 payload.state = state_t::DESCENT;
-            return;
+            break;
+
         case state_t::DESCENT:  // 4
             if (alt_avg < 500)
                 payload.state = state_t::DESCENT_ENB_CELL;
-            return;
+            break;
+
         case state_t::DESCENT_ENB_CELL:  // 5
             if (alts.count_if(compare_dv, alt_avg, 1.f) > STATE_SAMPLE_CNT / 2)
                 payload.state = state_t::LANDED_FIXED;
-            return;
+            break;
+
         case state_t::LANDED_FIXED: { // 6
             // Accepting state, reset the MCU to restart the process
             static bool triggered = false;
             if (!triggered) {
-                scheduler.get_task(write_comm) = task_t(write_comm, 2 * COMM_INT_LORA, millis);
+                scheduler.get_task(write_comm) = task_t(write_comm, 2 * SET_INT(COMM_INT_LORA), millis);
                 triggered = true;
             }
-            return;
+            break;
         }
-        case state_t::INVALIDATE:  // 255 (entry)
+
+        case state_t::INVALID:  // 255 (entry)
             if (alt_avg <= FLOOR_ALTITUDE)
                 payload.state = state_t::PREPARATION;
             else if (alt_avg <= HALF_BURST_ALTITUDE)
                 payload.state = state_t::ASCENT_TO_HALF;
             else
                 payload.state = state_t::ASCENT_TO_MAX;
-            return;
+            break;
     }
 }
 
@@ -577,11 +586,12 @@ void debug_prompt_handler(Stream &stream) {
     // Cancel if rx_cnt is less than 5
     if (rx_cnt < 5) return;
 
+    payload.last_response = c;
+
     switch (c) {
         case '0': // Turn "off" LEDs toggling and LEDs
             scheduler.disable(blink_leds);
-            digitalWrite(PIN_BOARD_LED, !LOW);
-            digitalWrite(PIN_LED, LOW);
+            LED_OFF();
             break;
 
         case '1': // Turn "on" LEDs toggling
@@ -590,20 +600,19 @@ void debug_prompt_handler(Stream &stream) {
 
         case '2': // Turn "on" static LEDs
             scheduler.disable(blink_leds);
-            digitalWrite(PIN_BOARD_LED, !HIGH);
-            digitalWrite(PIN_LED, HIGH);
+            LED_ON();
             break;
 
         case '3': // set LoRa interval at half interval
-            scheduler.get_task(write_comm) = task_t(write_comm, COMM_INT_LORA / 2, millis);
+            scheduler.get_task(write_comm) = task_t(write_comm, SET_INT(COMM_INT_LORA / 2), millis);
             break;
 
         case '4': // set LoRa interval at full interval
-            scheduler.get_task(write_comm) = task_t(write_comm, COMM_INT_LORA, millis);
+            scheduler.get_task(write_comm) = task_t(write_comm, SET_INT(COMM_INT_LORA), millis);
             break;
 
         case '5': // set LoRa interval at double interval
-            scheduler.get_task(write_comm) = task_t(write_comm, 2 * COMM_INT_LORA, millis);
+            scheduler.get_task(write_comm) = task_t(write_comm, 2 * SET_INT(COMM_INT_LORA), millis);
             break;
 
         case 'c': // fall through
@@ -612,20 +621,39 @@ void debug_prompt_handler(Stream &stream) {
 
         case 's': // fall through
         case 'S': // List SD card files
+
+#ifdef SIMPLE_RXTX
+            stream.write(START_SEQ_CMD, sizeof(START_SEQ_DAT));
+#endif
+
             if (valid.sd0) {
                 stream.println("SD0 Files");
-                list_files(sd0);
+                list_files(sd0, "/", stream);
             }
             if (valid.sd1) {
                 stream.println("SD1 Files");
-                list_files(sd1);
+                list_files(sd1, "/", stream);
             }
             break;
 
         case 'd': // fall through
         case 'D': // Delete all files in all SD Card (All files will be lost!)
-            if (valid.sd0) delete_all_in(sd0);
-            if (valid.sd1) delete_all_in(sd1);
+
+#ifdef SIMPLE_RXTX
+            stream.write(START_SEQ_CMD, sizeof(START_SEQ_DAT));
+#endif
+
+            if (valid.sd0) {
+                sd0_file.close();
+                delete_all_in(sd0);
+            }
+            if (valid.sd1) {
+                sd0_file.close();
+                delete_all_in(sd1);
+            }
+            if (valid.sd0 || valid.sd1) {
+                __NVIC_SystemReset();
+            }
             break;
 
         case 'i': // fall through
@@ -640,15 +668,22 @@ void debug_prompt_handler(Stream &stream) {
 
         case 'r': // fall through
         case 'R': // System Reset
-            NVIC_SystemReset();
+            __NVIC_SystemReset();
 
-        case 'x':
-        case 'X':
-        default:
+        case 'x': // fall through
+        case 'X': // Do nothing and reset latest response
+            payload.last_response = 'x';
+            break;
+
+        default: // Invalid command
+            payload.last_response = '*';
             break;
     }
 }
 
+/*
+ * Generates I2C devices list table (similar to i2cdetect command)
+ */
 void i2cdetect(uint8_t first, uint8_t last, TwoWire &wire, Stream &stream) {
     static uint8_t resp;
     static char buf[10];
