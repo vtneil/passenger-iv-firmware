@@ -26,13 +26,13 @@ enum class rx_mode_t : uint8_t {
     RX_CMD
 };
 
-task_scheduler<1> scheduler;
-
 extern void add_to_buf(uint8_t, uint8_t *, size_t);
 
 extern void handle_data(const struct mcu0_data &, const checksum_t &);
 
 #endif
+
+task_scheduler<1> scheduler;
 
 void setup() {
     // Enable onboard LED
@@ -71,7 +71,7 @@ void setup() {
     payload_str.reserve(PAYLOAD_STR_MAX_LEN);
 #endif
 
-    scheduler.add_task([]() -> void { digitalToggle(PIN_BOARD_LED); }, SET_INT(1000u), millis);
+    scheduler.add_task([]() -> void { digitalToggle(PIN_BOARD_LED); }, SET_INT(250u), millis);
 }
 
 void loop() {
@@ -79,7 +79,8 @@ void loop() {
     static size_t i = 0;
     static rx_mode_t rx_mode = rx_mode_t::RX_WAIT;
     static uint8_t b;
-    static checksum_t checksum_ref;
+    static checksum_t checksum_data;
+    static struct mcu0_data data_data;
 
     while (SerialLoRa.available()) {
         digitalToggle(PIN_BOARD_LED);
@@ -130,16 +131,11 @@ void loop() {
                     // Data might be invalid despite correct checksum.
                     if (i == sizeof(struct mcu0_data)) {
                         // Checksum
-                        checksum_ref = *reinterpret_cast<checksum_t *>(payload_buf);
-                        calc_checksum<checksum_t>(
-                                *reinterpret_cast<struct mcu0_data *>(payload_buf + sizeof(checksum_t)),
-                                checksum_calc
-                        );
-                        if (checksum_ref == checksum_calc) {
-                            handle_data(
-                                    *reinterpret_cast<struct mcu0_data *>(payload_buf + sizeof(checksum_t)),
-                                    checksum_ref
-                            );
+                        memcpy(&checksum_data, payload_buf, sizeof(checksum_t));
+                        memcpy(&data_data, payload_buf + sizeof(checksum_t), sizeof(struct mcu0_data));
+                        calc_checksum<checksum_t>(&data_data, &checksum_calc);
+                        if (true || checksum_data == checksum_calc) {
+                            handle_data(data_data, checksum_data);
                         }
 
                         // Reset Index, go to start mode
@@ -180,8 +176,9 @@ void add_to_buf(uint8_t b, uint8_t *buf, size_t n) {
     buf[n - 1] = b;
 }
 
-inline void handle_data(const struct mcu0_data &payload, const checksum_t &checksum) {
-    static char buf[2 + (2 * sizeof(checksum_t)) + 1] = "";
+inline void handle_data(const struct mcu0_data &payload, const checksum_t &checksum_ref) {
+    static char buf_ref[2 + (2 * sizeof(checksum_t)) + 1] = "";
+    static char buf_calc[sizeof(buf_ref)] = "";
 
     build_string_to(payload_str,
                     payload.band_id,
@@ -216,19 +213,35 @@ inline void handle_data(const struct mcu0_data &payload, const checksum_t &check
 
     switch (sizeof(checksum_t)) {
         case 1: // uint8_t
-            snprintf(buf, sizeof(buf), "0x%02X", checksum);
+            snprintf(buf_ref, sizeof(buf_ref), "0x%02X", checksum_ref);
+            snprintf(buf_calc, sizeof(buf_calc), "0x%02X", checksum_calc);
             break;
         case 2: // uint16_t
-            snprintf(buf, sizeof(buf), "0x%04X", checksum);
+            snprintf(buf_ref, sizeof(buf_ref), "0x%04hX", checksum_ref);
+            snprintf(buf_calc, sizeof(buf_calc), "0x%04hX", checksum_calc);
             break;
         case 4: // uint32_t
-            snprintf(buf, sizeof(buf), "0x%08lX", checksum);
+            snprintf(buf_ref, sizeof(buf_ref), "0x%08lX", checksum_ref);
+            snprintf(buf_calc, sizeof(buf_calc), "0x%08lX", checksum_calc);
             break;
-        case 8: // uint64_t
-            snprintf(buf, sizeof(buf), "0x%016llX", checksum);
+        case 8: { // uint64_t
+            static union alias_uint64_t {
+                uint64_t v64;
+                uint32_t v32[2];
+            } val64 = {};
+
+            val64.v64 = checksum_ref;
+            snprintf(buf_ref, sizeof(buf_ref), "0x%08lX%08lX", val64.v32[1], val64.v32[0]);
+
+            val64.v64 = checksum_calc;
+            snprintf(buf_calc, sizeof(buf_calc), "0x%08lX%08lX", val64.v32[1], val64.v32[0]);
             break;
+        }
     }
-    Serial.print(buf);
+
+    Serial.print(buf_ref);
+    Serial.print(",");
+    Serial.print(buf_calc);
     Serial.print(",");
     Serial.print(payload_str);
     Serial.print('\n');

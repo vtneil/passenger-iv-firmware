@@ -49,6 +49,7 @@
 #define PIN_SPI_MOSI1           PA7
 #define PIN_SPI_CS_SD_INT       PA4
 #define PIN_SPI_CS_SD_EXT       PB1
+
 #define SPI_SPEED_SD_MHZ        (20)
 
 #define LORA_CHANNEL            (33)
@@ -78,7 +79,7 @@
 #define I2C_CLOCK_FAST_PLUS     (1000000u)
 #define I2C_CLOCK_HIGH_SPEED    (3400000u)
 
-#define I2C_CLOCK_SPEED         (I2C_CLOCK_STANDARD)
+#define I2C_CLOCK_SPEED         (I2C_CLOCK_FAST)
 
 // MCU Data
 #define PAYLOAD_STR_MAX_LEN     (256u)
@@ -146,38 +147,130 @@ constexpr uint8_t START_SEQ_DAT[4] = {0xff, 0xff, 0xff, 0xff};
 constexpr uint8_t START_SEQ_CMD[4] = {0xee, 0xee, 0xee, 0xee};
 
 // Checksum type: uint8_t (1 byte), uint16_t (2 byte), uint32_t (4 byte), or uint64_t (8 byte)
+//using checksum_t = uint8_t;
+//using checksum_t = uint16_t;
+//using checksum_t = uint32_t;
 using checksum_t = uint64_t;
 
-template<typename OutputType = uint8_t, typename InputType>
-void calc_checksum(const InputType &input_data, OutputType &result) {
+//template<typename OutputType, typename InputType>
+//void calc_checksum(const InputType *input_data, OutputType *result) {
+//    static_assert(sizeof(InputType) >= sizeof(OutputType), "Can\'t calculate checksum of this data type.");
+//
+//    using byte_t = uint8_t;
+//    constexpr OutputType bs = 1;
+//    constexpr size_t Q = DIV_FLOOR(sizeof(InputType), sizeof(OutputType));
+//    constexpr size_t R = MOD_OP(sizeof(InputType), sizeof(OutputType));
+//    constexpr size_t S = Q + 1;
+//    constexpr size_t BITS_SHIFT = 4 * sizeof(OutputType);
+//    constexpr OutputType MASK_H = OutputType(-1) << BITS_SHIFT;
+//    constexpr OutputType MASK_L = ~MASK_H;
+//
+//    byte_t ptr_result[sizeof(OutputType)];
+//    memset(&ptr_result, 0, sizeof(OutputType));
+//
+//    OutputType data_output_t;
+//    memset(&data_output_t, 0, sizeof(OutputType));
+//
+//    byte_t ptr_input_as_byte_t[sizeof(InputType)];
+//    memcpy(ptr_input_as_byte_t, input_data, sizeof(InputType));
+//
+//    OutputType ptr_input_as_output_t[S];
+//    memset(ptr_input_as_output_t, 0, S * sizeof(OutputType));
+//    memcpy(ptr_input_as_output_t, input_data, sizeof(InputType));
+//
+//    // Full XOR
+//    for (size_t i = 0; i < Q; ++i)
+//        data_output_t ^= ptr_input_as_output_t[i];
+//    memcpy(ptr_result, &data_output_t, sizeof(OutputType));
+//
+//    // Partial XOR for remainder
+//    for (size_t i = 0; i < R; ++i)
+//        ptr_result[i] ^= ptr_input_as_byte_t[(Q * sizeof(OutputType)) + i];
+//    memcpy(&data_output_t, ptr_result, sizeof(OutputType));
+//
+//    // XOR Shifting Left to Right
+//    for (size_t i = 8 * sizeof(OutputType) - 1; i > 0; --i)
+//        data_output_t ^= data_output_t << i;
+//    for (size_t i = 1; i < 8 * sizeof(OutputType); ++i)
+//        data_output_t ^= data_output_t >> i;
+//
+//    // XOR with its reverse bits
+//    OutputType data_output_t_rev;
+//    memset(&data_output_t_rev, 0, sizeof(OutputType));
+//
+//    for (size_t i = 0; i < 8 * sizeof(OutputType); ++i)
+//        if (data_output_t & (bs << i))
+//            data_output_t_rev |= 1 << ((8 * sizeof(OutputType) - 1) - i);
+//    data_output_t ^= data_output_t_rev;
+//
+//    // Swap first half bytes/nibbles with not second half bytes/nibbles and invert bits
+//    data_output_t = ((data_output_t & MASK_L) << BITS_SHIFT) | ((data_output_t & MASK_H) >> BITS_SHIFT);
+//    data_output_t = ~data_output_t;
+//
+//    // Return value
+//    memcpy(result, &data_output_t, sizeof(OutputType));
+//}
+
+template<typename OutputType, typename InputType>
+void calc_checksum(const InputType *input_data, OutputType *result) {
+    static_assert(sizeof(InputType) >= sizeof(OutputType), "Can\'t calculate checksum of this data type.");
+
     using byte_t = uint8_t;
-    constexpr size_t q = DIV_FLOOR(sizeof(InputType), sizeof(OutputType));
-    constexpr size_t r = MOD_OP(sizeof(InputType), sizeof(OutputType));
-    static const OutputType *ptr;
+    constexpr OutputType bs = 1;
+    constexpr size_t Q = DIV_FLOOR(sizeof(InputType), sizeof(OutputType));
+    constexpr size_t R = MOD_OP(sizeof(InputType), sizeof(OutputType));
+    constexpr size_t S = Q + 1;
+    constexpr size_t BITS_SHIFT = 4 * sizeof(OutputType);
+    constexpr OutputType MASK_H = OutputType(-1) << BITS_SHIFT;
+    constexpr OutputType MASK_L = ~MASK_H;
 
-    ptr = reinterpret_cast<const OutputType *>(&input_data);
+    union alias_input_t {
+        InputType as_input_t;
+        byte_t as_byte_t[sizeof(InputType)];
+        OutputType as_output_t[S];
+    } input_alias;
+    input_alias.as_input_t = *input_data;
 
-    // Clear result
-    memset(&result, 0, sizeof(result));
+    union alias_output_t {
+        OutputType as_output_t;
+        byte_t as_byte_t[sizeof(OutputType)];
+    } output_alias = {};
 
     // Full XOR
-    for (size_t i = 0; i < q; ++i) {
-        result ^= *ptr++;
-    }
+    for (size_t i = 0; i < Q; ++i)
+        output_alias.as_output_t ^= input_alias.as_output_t[i];
 
     // Partial XOR for remainder
-    for (size_t i = 0; i < r; ++i) {
-        *(reinterpret_cast<byte_t *>(&result) + i) ^= *(reinterpret_cast<const byte_t *>(ptr) + i);
-    }
+    for (size_t i = 0; i < R; ++i)
+        output_alias.as_byte_t[i] ^= input_alias.as_byte_t[(Q * sizeof(OutputType)) + i];
 
-    OutputType swapped = (result << 4 * sizeof(OutputType)) | (result >> 4 * sizeof(OutputType));
-    result = (swapped << 1) | (swapped >> 1);
+    // XOR Shifting Left to Right
+    for (size_t i = 8 * sizeof(OutputType) - 1; i > 0; --i)
+        output_alias.as_output_t ^= output_alias.as_output_t << i;
+    for (size_t i = 1; i < 8 * sizeof(OutputType); ++i)
+        output_alias.as_output_t ^= output_alias.as_output_t >> i;
+
+    // XOR with its reverse bits
+    OutputType data_output_t_rev = {};
+
+    for (size_t i = 0; i < 8 * sizeof(OutputType); ++i)
+        if (output_alias.as_output_t & (bs << i))
+            data_output_t_rev |= 1 << ((8 * sizeof(OutputType) - 1) - i);
+    output_alias.as_output_t ^= data_output_t_rev;
+
+    // Swap first half bytes/nibbles with not second half bytes/nibbles and invert bits
+    output_alias.as_output_t = ((output_alias.as_output_t & MASK_L) << BITS_SHIFT) |
+                               ((output_alias.as_output_t & MASK_H) >> BITS_SHIFT);
+    output_alias.as_output_t = ~output_alias.as_output_t;
+
+    // Return value
+    *result = output_alias.as_output_t;
 }
 
 template<typename OutputType, typename InputType>
-OutputType calc_checksum(const InputType &result) {
+OutputType calc_checksum(const InputType *data) {
     static OutputType chk;
-    calc_checksum(result, chk);
+    calc_checksum(data, &chk);
     return chk;
 }
 

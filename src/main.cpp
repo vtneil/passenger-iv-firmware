@@ -452,6 +452,8 @@ void write_sd1() {
 }
 
 void write_usb() {
+    static checksum_t checksum_tmp;
+    static char buf[2 + (2 * sizeof(checksum_t)) + 1] = "";
     static String valid_str;
     valid_str.reserve(8);
 
@@ -472,20 +474,38 @@ void write_usb() {
 //         << HAL_RCC_GetPCLK2Freq() << ' '
 //         << "\r\n";
 
+    calc_checksum<checksum_t>(&payload, &checksum_tmp);
+
+    switch (sizeof(checksum_t)) {
+        case 1: // uint8_t
+            snprintf(buf, sizeof(buf), "0x%02X", checksum_tmp);
+            break;
+        case 2: // uint16_t
+            snprintf(buf, sizeof(buf), "0x%04hX", checksum_tmp);
+            break;
+        case 4: // uint32_t
+            snprintf(buf, sizeof(buf), "0x%08lX", checksum_tmp);
+            break;
+        case 8: // uint64_t
+            snprintf(buf, sizeof(buf), "0x%08lX%08lX",
+                     reinterpret_cast<const uint32_t *const>(&checksum_tmp)[1],
+                     reinterpret_cast<const uint32_t *const>(&checksum_tmp)[0]);
+            break;
+    }
+
     cout << "Valid=" << valid_str
-         << ", Size=" << sizeof(payload)
-         << ", Length=" << payload_str.length()
          << ", Free Mem=" << free_memory()
+         << ", Checksum=" << buf
          << ", Data=" << payload_str
          << "\r\n";
 }
 
 void write_comm() {
 #ifndef SIMPLE_RXTX
-    checksum = calc_checksum<checksum_t>(payload);
+    calc_checksum<checksum_t>(&payload, &checksum);
     SerialLoRa.write(START_SEQ_DAT, sizeof(START_SEQ_DAT));
-    SerialLoRa.write(reinterpret_cast<uint8_t *>(&checksum), sizeof(checksum));
-    SerialLoRa.write(reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
+    SerialLoRa.write(reinterpret_cast<uint8_t *>(&checksum), sizeof(decltype(checksum)));
+    SerialLoRa.write(reinterpret_cast<uint8_t *>(&payload), sizeof(decltype(payload)));
 #else
     SerialLoRa.println(payload_str);
 #endif
@@ -676,7 +696,7 @@ void debug_prompt_handler(Stream &stream) {
             break;
 
         default: // Invalid command
-            payload.last_response = '*';
+            payload.last_response = 'z';
             break;
     }
 }
