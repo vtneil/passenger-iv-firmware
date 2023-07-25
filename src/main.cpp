@@ -486,11 +486,16 @@ void write_usb() {
         case 4: // uint32_t
             snprintf(buf, sizeof(buf), "0x%08lX", checksum_tmp);
             break;
-        case 8: // uint64_t
-            snprintf(buf, sizeof(buf), "0x%08lX%08lX",
-                     reinterpret_cast<const uint32_t *const>(&checksum_tmp)[1],
-                     reinterpret_cast<const uint32_t *const>(&checksum_tmp)[0]);
+        case 8: { // uint64_t
+            static union alias_uint64_t {
+                uint64_t v64;
+                uint32_t v32[2];
+            } val64 = {};
+
+            val64.v64 = checksum_tmp;
+            snprintf(buf, sizeof(buf), "0x%08lX%08lX", val64.v32[1], val64.v32[0]);
             break;
+        }
     }
 
     cout << "Valid=" << valid_str
@@ -599,8 +604,11 @@ void debug_prompt_handler(Stream &stream) {
 
     // Clear remaining on buffer
     while (stream.available()) {
-        if (c != static_cast<char>(stream.read())) return;
-        ++rx_cnt;
+        if (c != static_cast<char>(stream.read())) {
+            if (c != '\r' && c != '\n') return;  // Ignore CR and LF characters
+        } else {
+            ++rx_cnt;
+        }
     }
 
     // Cancel if rx_cnt is less than 5
