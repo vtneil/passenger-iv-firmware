@@ -24,15 +24,6 @@
 #include "psg_4_sd_tools.h"
 #include "psg_4_data_tools.h"
 
-/**
- * Macros and Options
- */
-//#define DEBUG_PRINT
-//#define ENABLE_IWDT
-#define ENABLE_UPLINK
-#define BLINK_STATUS
-//#define CONFIG_LORA
-
 /*
  * Namespaces
  */
@@ -109,11 +100,11 @@ struct peripherals {
     bool sd0;
     bool sd1;
     bool bme280;
-    bool ms8607;
-    bool ds18b20;
-    bool mprls;
     bool bno085;
     bool m10s;
+    bool ms8607;
+    bool mprls;
+    bool ds18b20;
 } valid;
 
 lora_e22 lora(SerialLoRa, PIN_LORA_M0, PIN_LORA_M1);
@@ -301,7 +292,7 @@ void setup() {
     scheduler.add_task(blink_leds, SET_INT(250ul), millis);
 #endif
 
-    // System: IWDG Timer
+    // System: IWDG Timer (1)
 #ifdef ENABLE_IWDT
     scheduler.add_task([]() -> void {
         IWatchdog.reload();
@@ -461,11 +452,11 @@ void write_usb() {
     valid_str += STR_REPR(valid.sd0);
     valid_str += STR_REPR(valid.sd1);
     valid_str += STR_REPR(valid.bme280);
-    valid_str += STR_REPR(valid.ms8607);
-    valid_str += STR_REPR(valid.ds18b20);
-    valid_str += STR_REPR(valid.mprls);
     valid_str += STR_REPR(valid.bno085);
     valid_str += STR_REPR(valid.m10s);
+    valid_str += STR_REPR(valid.ms8607);
+    valid_str += STR_REPR(valid.mprls);
+    valid_str += STR_REPR(valid.ds18b20);
 
 //    cout << "Core, HCLK, APB1, APB2 = "
 //         << SystemCoreClock << ' '
@@ -474,7 +465,7 @@ void write_usb() {
 //         << HAL_RCC_GetPCLK2Freq() << ' '
 //         << "\r\n";
 
-    calc_checksum<checksum_t>(&payload, &checksum_tmp);
+    calc_checksum<checksum_t>(payload, checksum_tmp);
 
     switch (sizeof(checksum_t)) {
         case 1: // uint8_t
@@ -487,27 +478,23 @@ void write_usb() {
             snprintf(buf, sizeof(buf), "0x%08lX", checksum_tmp);
             break;
         case 8: { // uint64_t
-            static union alias_uint64_t {
-                uint64_t v64;
-                uint32_t v32[2];
-            } val64 = {};
-
-            val64.v64 = checksum_tmp;
-            snprintf(buf, sizeof(buf), "0x%08lX%08lX", val64.v32[1], val64.v32[0]);
+            uint32_t data_h = checksum_tmp >> 32;
+            uint32_t data_l = checksum_tmp & 0xFFFFFFFF;
+            snprintf(buf, sizeof(buf), "0x%08lX%08lX", data_h, data_l);
             break;
         }
     }
 
-    cout << "Valid=" << valid_str
-         << ", Free Mem=" << free_memory()
-         << ", Checksum=" << buf
-         << ", Data=" << payload_str
+    cout << "VAL=" << valid_str
+         << ", FRM=" << free_memory()
+         << ", CHK=" << buf
+         << ", DAT=" << payload_str
          << "\r\n";
 }
 
 void write_comm() {
 #ifndef SIMPLE_RXTX
-    calc_checksum<checksum_t>(&payload, &checksum);
+    calc_checksum<checksum_t>(payload, checksum);
     SerialLoRa.write(START_SEQ_DAT, sizeof(START_SEQ_DAT));
     SerialLoRa.write(reinterpret_cast<uint8_t *>(&checksum), sizeof(decltype(checksum)));
     SerialLoRa.write(reinterpret_cast<uint8_t *>(&payload), sizeof(decltype(payload)));
@@ -650,7 +637,7 @@ void debug_prompt_handler(Stream &stream) {
         case 's': // fall through
         case 'S': // List SD card files
 
-#ifdef SIMPLE_RXTX
+#ifndef SIMPLE_RXTX
             stream.write(START_SEQ_CMD, sizeof(START_SEQ_DAT));
 #endif
 
@@ -667,7 +654,7 @@ void debug_prompt_handler(Stream &stream) {
         case 'd': // fall through
         case 'D': // Delete all files in all SD Card (All files will be lost!)
 
-#ifdef SIMPLE_RXTX
+#ifndef SIMPLE_RXTX
             stream.write(START_SEQ_CMD, sizeof(START_SEQ_DAT));
 #endif
 

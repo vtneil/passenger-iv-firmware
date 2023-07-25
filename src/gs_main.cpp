@@ -18,7 +18,7 @@ lora_e22 lora(SerialLoRa, GCS_PIN_LORA_M0, GCS_PIN_LORA_M1);
 uint8_t payload_buf[sizeof(checksum_t) + sizeof(struct mcu0_data)];
 uint8_t compare_buf[sizeof(START_SEQ_DAT)];
 String payload_str;
-checksum_t checksum_calc;
+checksum_t checksum_dst;
 
 enum class rx_mode_t : uint8_t {
     RX_WAIT = 0,
@@ -79,7 +79,7 @@ void loop() {
     static size_t i = 0;
     static rx_mode_t rx_mode = rx_mode_t::RX_WAIT;
     static uint8_t b;
-    static checksum_t checksum_data;
+    static checksum_t checksum_src;
     static struct mcu0_data data_data;
 
     while (SerialLoRa.available()) {
@@ -131,11 +131,11 @@ void loop() {
                     // Data might be invalid despite correct checksum.
                     if (i == sizeof(struct mcu0_data)) {
                         // Checksum
-                        memcpy(&checksum_data, payload_buf, sizeof(checksum_t));
+                        memcpy(&checksum_src, payload_buf, sizeof(checksum_t));
                         memcpy(&data_data, payload_buf + sizeof(checksum_t), sizeof(struct mcu0_data));
-                        calc_checksum<checksum_t>(&data_data, &checksum_calc);
-                        if (true || checksum_data == checksum_calc) {
-                            handle_data(data_data, checksum_data);
+                        calc_checksum<checksum_t>(data_data, checksum_dst);
+                        if (true || checksum_src == checksum_dst) {
+                            handle_data(data_data, checksum_src);
                         }
 
                         // Reset Index, go to start mode
@@ -176,7 +176,7 @@ void add_to_buf(uint8_t b, uint8_t *buf, size_t n) {
     buf[n - 1] = b;
 }
 
-inline void handle_data(const struct mcu0_data &payload, const checksum_t &checksum_ref) {
+inline void handle_data(const struct mcu0_data &payload, const checksum_t &checksum_src) {
     static char buf_ref[2 + (2 * sizeof(checksum_t)) + 1] = "";
     static char buf_calc[sizeof(buf_ref)] = "";
 
@@ -213,28 +213,25 @@ inline void handle_data(const struct mcu0_data &payload, const checksum_t &check
 
     switch (sizeof(checksum_t)) {
         case 1: // uint8_t
-            snprintf(buf_ref, sizeof(buf_ref), "0x%02X", checksum_ref);
-            snprintf(buf_calc, sizeof(buf_calc), "0x%02X", checksum_calc);
+            snprintf(buf_ref, sizeof(buf_ref), "0x%02X", checksum_src);
+            snprintf(buf_calc, sizeof(buf_calc), "0x%02X", checksum_dst);
             break;
         case 2: // uint16_t
-            snprintf(buf_ref, sizeof(buf_ref), "0x%04hX", checksum_ref);
-            snprintf(buf_calc, sizeof(buf_calc), "0x%04hX", checksum_calc);
+            snprintf(buf_ref, sizeof(buf_ref), "0x%04hX", checksum_src);
+            snprintf(buf_calc, sizeof(buf_calc), "0x%04hX", checksum_dst);
             break;
         case 4: // uint32_t
-            snprintf(buf_ref, sizeof(buf_ref), "0x%08lX", checksum_ref);
-            snprintf(buf_calc, sizeof(buf_calc), "0x%08lX", checksum_calc);
+            snprintf(buf_ref, sizeof(buf_ref), "0x%08lX", checksum_src);
+            snprintf(buf_calc, sizeof(buf_calc), "0x%08lX", checksum_dst);
             break;
         case 8: { // uint64_t
-            static union alias_uint64_t {
-                uint64_t v64;
-                uint32_t v32[2];
-            } val64 = {};
+            uint32_t data_h = checksum_src >> 32;
+            uint32_t data_l = checksum_src & 0xFFFFFFFF;
+            snprintf(buf_ref, sizeof(buf_ref), "0x%08lX%08lX", data_h, data_l);
 
-            val64.v64 = checksum_ref;
-            snprintf(buf_ref, sizeof(buf_ref), "0x%08lX%08lX", val64.v32[1], val64.v32[0]);
-
-            val64.v64 = checksum_calc;
-            snprintf(buf_calc, sizeof(buf_calc), "0x%08lX%08lX", val64.v32[1], val64.v32[0]);
+            data_h = checksum_dst >> 32;
+            data_l = checksum_dst & 0xFFFFFFFF;
+            snprintf(buf_calc, sizeof(buf_calc), "0x%08lX%08lX", data_h, data_l);
             break;
         }
     }
