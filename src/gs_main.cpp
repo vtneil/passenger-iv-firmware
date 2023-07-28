@@ -7,6 +7,7 @@
 //#define CONFIG_LORA
 
 #define FORWARD_COMM
+//#define PRINT_CHECKSUM
 
 using namespace vt;
 
@@ -113,7 +114,7 @@ void loop() {
             case rx_mode_t::RX_DAT: {
                 // Start copying data into buffer if start sequence is found.
                 // Now receiving mode: check for end sequence.
-                if (i < sizeof(struct mcu0_data)) {
+                if (i < sizeof(payload_buf)) {
                     // Receiving into buffer
                     payload_buf[i++] = b;
 
@@ -129,12 +130,13 @@ void loop() {
 
                     // Last index is met, use that data.
                     // Data might be invalid despite correct checksum.
-                    if (i == sizeof(struct mcu0_data)) {
+                    if (i == sizeof(payload_buf)) {
                         // Checksum
-                        memcpy(&checksum_src, payload_buf, sizeof(checksum_t));
-                        memcpy(&data_data, payload_buf + sizeof(checksum_t), sizeof(struct mcu0_data));
-                        calc_checksum<checksum_t>(data_data, checksum_dst);
-                        if (true || checksum_src == checksum_dst) {
+                        checksum_src = *reinterpret_cast<checksum_t *>(payload_buf);
+                        data_data = *reinterpret_cast<struct mcu0_data *>(payload_buf + sizeof(checksum_t));
+                        calc_checksum(payload_buf + sizeof(checksum_t), &checksum_dst);
+
+                        if (checksum_src == checksum_dst) {
                             handle_data(data_data, checksum_src);
                         }
 
@@ -177,9 +179,6 @@ void add_to_buf(uint8_t b, uint8_t *buf, size_t n) {
 }
 
 inline void handle_data(const struct mcu0_data &payload, const checksum_t &checksum_src) {
-    static char buf_ref[2 + (2 * sizeof(checksum_t)) + 1] = "";
-    static char buf_calc[sizeof(buf_ref)] = "";
-
     build_string_to(payload_str,
                     payload.band_id,
                     payload.counter,
@@ -211,6 +210,10 @@ inline void handle_data(const struct mcu0_data &payload, const checksum_t &check
                     payload.batt_volt
     );
 
+#ifdef PRINT_CHECKSUM
+    static char buf_ref[2 + (2 * sizeof(checksum_t)) + 1] = "";
+    static char buf_calc[sizeof(buf_ref)] = "";
+
     switch (sizeof(checksum_t)) {
         case 1: // uint8_t
             snprintf(buf_ref, sizeof(buf_ref), "0x%02X", checksum_src);
@@ -225,13 +228,12 @@ inline void handle_data(const struct mcu0_data &payload, const checksum_t &check
             snprintf(buf_calc, sizeof(buf_calc), "0x%08lX", checksum_dst);
             break;
         case 8: { // uint64_t
-            uint32_t data_h = checksum_src >> 32;
-            uint32_t data_l = checksum_src & 0xFFFFFFFF;
-            snprintf(buf_ref, sizeof(buf_ref), "0x%08lX%08lX", data_h, data_l);
-
-            data_h = checksum_dst >> 32;
-            data_l = checksum_dst & 0xFFFFFFFF;
-            snprintf(buf_calc, sizeof(buf_calc), "0x%08lX%08lX", data_h, data_l);
+            snprintf(buf_ref, sizeof(buf_ref), "0x%08lX%08lX",
+                     uint32_t(checksum_src >> 32),
+                     uint32_t(checksum_src & 0x00000000FFFFFFFFull));
+            snprintf(buf_calc, sizeof(buf_calc), "0x%08lX%08lX",
+                     uint32_t(checksum_dst >> 32),
+                     uint32_t(checksum_dst & 0x00000000FFFFFFFFull));
             break;
         }
     }
@@ -240,6 +242,7 @@ inline void handle_data(const struct mcu0_data &payload, const checksum_t &check
     Serial.print(",");
     Serial.print(buf_calc);
     Serial.print(",");
+#endif
     Serial.print(payload_str);
     Serial.print('\n');
 }

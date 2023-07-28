@@ -25,6 +25,13 @@
 #define TARGET_BURST_ALTITUDE   (40000.f)
 #define HALF_BURST_ALTITUDE     (TARGET_BURST_ALTITUDE / 2.f)
 
+// ADCs
+#define MY_ADC_RESOLUTION       (12)
+#define MY_ADC_MAX_VALUE        (1 << MY_ADC_RESOLUTION)
+
+// Servo
+#define TIME_SERVO_CUT          (20ul * 1000ul)
+
 // Watchdog Timer Parameters
 #define WDT_INT_SAFE_MODE       (4000ul * 1000ul)
 #define WDT_INT_OPS_MODE        (2000ul * 1000ul)
@@ -42,7 +49,9 @@
 // Pins Configuration
 #define PIN_BOARD_LED           PC13
 #define PIN_LED                 PB4
-#define PIN_CTRL_CUT            PB5
+#define PIN_BUZZER              PB12
+//#define PIN_SERVO_CUT           PB3
+#define PIN_SERVO_CUT           PB5
 #define PIN_VBATT               PA1
 
 #define PIN_I2C_SCL1            PB6
@@ -73,6 +82,12 @@
                                 digitalWrite(PIN_LED, 0)
 #define LED_TOGGLE()            digitalToggle(PIN_BOARD_LED); \
                                 digitalToggle(PIN_LED)
+#define BUZZER_ON()             digitalWrite(PIN_BUZZER, 1)
+#define BUZZER_OFF()            digitalWrite(PIN_BUZZER, 0)
+#define BUZZER_TOGGLE()         digitalToggle(PIN_BUZZER)
+
+#define SERVO_OFF()             digitalWrite(PIN_SERVO_CUT, LOW)
+#define SERVO_ON()              digitalWrite(PIN_SERVO_CUT, HIGH)
 
 // Other parameters
 #define UBLOX_CUSTOM_MAX_WAIT   (250u)
@@ -87,6 +102,7 @@
 
 // MCU Data
 #define PAYLOAD_STR_MAX_LEN     (256u)
+#define PAYLOAD_COMM_MAX_CNT    (2)
 
 // States
 enum class state_t : uint8_t {
@@ -146,6 +162,17 @@ struct mcu0_data {
     uint32_t batt_volt;
 };
 
+struct mcu1_data {
+    uint8_t band_id;
+    uint32_t counter;
+
+    uint8_t siv;
+    uint32_t gps_time;
+    double latitude;
+    double longitude;
+    float altitude;
+};
+
 // Transmission Sequences (each byte must not overlap)
 constexpr uint8_t START_SEQ_DAT[4] = {0xff, 0xff, 0xff, 0xff};
 constexpr uint8_t START_SEQ_CMD[4] = {0xee, 0xee, 0xee, 0xee};
@@ -156,66 +183,70 @@ constexpr uint8_t START_SEQ_CMD[4] = {0xee, 0xee, 0xee, 0xee};
 //using checksum_t = uint32_t;
 using checksum_t = uint64_t;
 
-template<typename OutputType, typename InputType>
-void calc_checksum(const InputType &input_data, OutputType &result) {
-    static_assert(sizeof(InputType) >= sizeof(OutputType), "Can\'t calculate checksum of this data type.");
+template<typename InputType, typename OutputType>
+struct calc_checksum_t {
+    void operator()(const void *const input_ptr, void *const result) const {
+        calc_checksum_impl(*reinterpret_cast<const InputType *const>(input_ptr),
+                           reinterpret_cast<OutputType *const>(result));
+    }
 
-    using byte_t = uint8_t;
-    constexpr OutputType bs = 1;
-    constexpr size_t Q = sizeof(InputType) / sizeof(OutputType);
-    constexpr size_t R = sizeof(InputType) % sizeof(OutputType);
-    constexpr size_t S = Q + 1;
-    constexpr size_t BITS_SHIFT = 4 * sizeof(OutputType);
-    constexpr OutputType MASK_H = OutputType(-1) << BITS_SHIFT;
-    constexpr OutputType MASK_L = ~MASK_H;
+protected:
+    __attribute__((always_inline))
+    void calc_checksum_impl(const InputType &input_data, OutputType *const result) const {
+        static_assert(sizeof(InputType) >= sizeof(OutputType), "Can\'t calculate checksum of this data type.");
 
-    // Initialization
-    byte_t input_as_byte_t[sizeof(InputType)];
-    memcpy(input_as_byte_t, &input_data, sizeof(InputType));
+        using byte_t = uint8_t;
+        constexpr OutputType ZERO = 0;
+        constexpr OutputType ONE = 1;
+        constexpr OutputType MASK = ZERO - ONE;
+        constexpr size_t Q = sizeof(InputType) / sizeof(OutputType);
+        constexpr size_t R = sizeof(InputType) % sizeof(OutputType);
+        constexpr size_t S = DIV_CEIL(sizeof(InputType), sizeof(OutputType));
+        constexpr size_t BITS_SHIFT = 4 * sizeof(OutputType);
+        constexpr OutputType MASK_H = MASK << BITS_SHIFT;
+        constexpr OutputType MASK_L = ~MASK_H;
 
-    OutputType input_as_output_t[S];
-    memset(input_as_output_t, 0, S * sizeof(OutputType));
-    memcpy(input_as_output_t, &input_data, sizeof(InputType));
+        // Initialization
+        byte_t input_as_byte_t[sizeof(InputType)] = {};
+        memcpy(input_as_byte_t, &input_data, sizeof(InputType));
 
-    byte_t result_as_byte_t[sizeof(OutputType)];
-    memset(&result_as_byte_t, 0, sizeof(OutputType));
+        byte_t result_as_byte_t[sizeof(OutputType)] = {};
+        OutputType result_tmp;
 
-    OutputType result_tmp;
-    memset(&result_tmp, 0, sizeof(OutputType));
+        // Full XOR
+        for (size_t i = 0; i < Q; ++i)
+            *reinterpret_cast<OutputType *const>(result_as_byte_t) ^= reinterpret_cast<const OutputType *const>(input_as_byte_t)[i];
 
-    // Full XOR
-    for (size_t i = 0; i < Q; ++i)
-        result_tmp ^= input_as_output_t[i];
-    memcpy(result_as_byte_t, &result_tmp, sizeof(OutputType));
+        // Partial XOR for remainder
+        for (size_t i = 0; i < R; ++i)
+            result_as_byte_t[i] ^= input_as_byte_t[Q * sizeof(OutputType) + i];
+        result_tmp = *reinterpret_cast<const OutputType *const>(result_as_byte_t);
 
-    // Partial XOR for remainder
-    for (size_t i = 0; i < R; ++i)
-        result_as_byte_t[i] ^= input_as_byte_t[Q * sizeof(OutputType) + i];
-    memcpy(&result_tmp, result_as_byte_t, sizeof(OutputType));
+        // XOR Shifting Left to Right
+        for (size_t i = 8 * sizeof(OutputType) - 1; i > 0; --i)
+            result_tmp ^= result_tmp << i;
+        for (size_t i = 1; i < 8 * sizeof(OutputType); ++i)
+            result_tmp ^= result_tmp >> i;
 
-    // XOR Shifting Left to Right
-    for (size_t i = 8 * sizeof(OutputType) - 1; i > 0; --i)
-        result_tmp ^= result_tmp << i;
-    for (size_t i = 1; i < 8 * sizeof(OutputType); ++i)
-        result_tmp ^= result_tmp >> i;
+        // XOR with its reverse bits
+        OutputType result_rev_tmp = {};
+        for (size_t i = 0; i < 8 * sizeof(OutputType); ++i)
+            if (result_tmp & (ONE << i))
+                result_rev_tmp |= 1 << ((8 * sizeof(OutputType) - 1) - i);
+        result_tmp ^= result_rev_tmp;
 
-    // XOR with its reverse bits
-    OutputType result_rev_tmp;
-    memset(&result_rev_tmp, 0, sizeof(OutputType));
-    for (size_t i = 0; i < 8 * sizeof(OutputType); ++i)
-        if (result_tmp & (bs << i))
-            result_rev_tmp |= 1 << ((8 * sizeof(OutputType) - 1) - i);
-    result_tmp ^= result_rev_tmp;
+        // Swap first half bytes/nibbles with not second half bytes/nibbles
+        result_tmp = ((result_tmp & MASK_L) << BITS_SHIFT) | ((result_tmp & MASK_H) >> BITS_SHIFT);
 
-    // Swap first half bytes/nibbles with not second half bytes/nibbles
-    result_tmp = ((result_tmp & MASK_L) << BITS_SHIFT) | ((result_tmp & MASK_H) >> BITS_SHIFT);
+        // Invert bits
+        result_tmp = ~result_tmp;
 
-    // Invert bits
-    result_tmp = ~result_tmp;
+        // Return value
+        *result = result_tmp;
+    }
+};
 
-    // Return value
-    result = result_tmp;
-}
+calc_checksum_t<struct mcu0_data, checksum_t> calc_checksum = calc_checksum_t<struct mcu0_data, checksum_t>();
 
 // System Clock Configurations
 extern "C" void SystemClock_Config(void) {

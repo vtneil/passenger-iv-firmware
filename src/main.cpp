@@ -5,7 +5,6 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <IWatchdog.h>
-//#include <Servo.h>
 #include "SdFat.h"
 #include "SparkFun_u-blox_GNSS_v3.h"
 #include "Adafruit_Sensor.h"
@@ -107,6 +106,9 @@ struct peripherals {
     bool ds18b20;
 } valid;
 
+/*
+ * Peripherals
+ */
 lora_e22 lora(SerialLoRa, PIN_LORA_M0, PIN_LORA_M1);
 SFE_UBLOX_GNSS m10s;                // Internal: SF u-blox M10S
 bme280_t bme280;                    // Internal: BME280
@@ -119,6 +121,7 @@ Adafruit_BNO08x bno085;             // Internal: BNO08x
  * Smart delayers and Scheduler
  */
 task_scheduler<20> scheduler;
+smart_delay servo_delayer(TIME_SERVO_CUT, millis);
 
 /*
  * Functions
@@ -173,12 +176,12 @@ void setup() {
     // Enable external LED
     pinMode(PIN_LED, OUTPUT);
 
+    // Enable internal buzzer
+    pinMode(PIN_BUZZER, OUTPUT);
+
     // Turn on all LEDs
     LED_ON();
-
-    // Setup Servo Pin
-    pinMode(PIN_CTRL_CUT, OUTPUT);
-    digitalWrite(PIN_CTRL_CUT, LOW);
+    BUZZER_ON();
 
     // USB CDC Serial
     Serial.begin();
@@ -231,6 +234,7 @@ void setup() {
         m10s.setNavigationFrequency(5, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
         m10s.setAutoPVT(true, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
         m10s.setDynamicModel(DYN_MODEL_AIRBORNE2g, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
+
 //        m10s.saveConfiguration(UBLOX_CUSTOM_MAX_WAIT);  // (For saving to module's flash memory, optional)
     }
 
@@ -243,9 +247,31 @@ void setup() {
     ds18b20.begin();
     valid.ds18b20 = ds18b20.getAddress(one_wire_addresses, 0);
 
-    // Battery Voltage Readings (1)
+    // Servo (checker and disabler) (1)
+    pinMode(PIN_SERVO_CUT, OUTPUT);
+
+    while (true) {
+        LED_ON();
+        BUZZER_ON();
+        SERVO_ON();
+        delay(5000);
+        LED_OFF();
+        BUZZER_OFF();
+        SERVO_OFF();
+        delay(5000);
+    }
+
     scheduler.add_task([]() -> void {
-        payload.batt_volt = analogRead(PIN_VBATT);
+        if (servo_delayer) {
+            SERVO_OFF();
+        }
+    }, SET_INT(100ul), millis);
+
+    // Battery Voltage Readings (1)
+    pinMode(PIN_VBATT, INPUT_ANALOG);
+    analogReadResolution(MY_ADC_RESOLUTION);
+    scheduler.add_task([]() -> void {
+        payload.batt_volt = (analogRead(PIN_VBATT) * 100) / MY_ADC_MAX_VALUE;
     }, SET_INT(1000ul), millis);
 
     // Sensor reading tasks (6)
@@ -286,6 +312,7 @@ void setup() {
 
     // Turn off all LEDs
     LED_OFF();
+    BUZZER_OFF();
 
     // LED Blink during operation (1)
 #ifdef BLINK_STATUS
@@ -303,7 +330,10 @@ void setup() {
 
 void loop() { scheduler.exec(); }  // Run tasks only! Should not add anything. Long delay is prohibited.
 
-void blink_leds() { LED_TOGGLE(); }
+void blink_leds() {
+    LED_TOGGLE();
+    BUZZER_TOGGLE();
+}
 
 void config_lora() {
     lora.config();
@@ -393,7 +423,8 @@ void read_m10s() {
         payload.gps_siv = m10s.getSIV(UBLOX_CUSTOM_MAX_WAIT);
         payload.gps_latitude = static_cast<double>(m10s.getLatitude(UBLOX_CUSTOM_MAX_WAIT)) * 1.e-7;
         payload.gps_longitude = static_cast<double>(m10s.getLongitude(UBLOX_CUSTOM_MAX_WAIT)) * 1.e-7;
-        payload.gps_altitude = static_cast<float>(m10s.getAltitude(UBLOX_CUSTOM_MAX_WAIT)) * 1.e-3f;
+//        payload.gps_altitude = static_cast<float>(m10s.getAltitude(UBLOX_CUSTOM_MAX_WAIT)) * 1.e-3f;  // Ellipsoid
+        payload.gps_altitude = static_cast<float>(m10s.getAltitudeMSL(UBLOX_CUSTOM_MAX_WAIT)) * 1.e-3f;
     }
 }
 
@@ -443,9 +474,9 @@ void write_sd1() {
 }
 
 void write_usb() {
-    static checksum_t checksum_tmp;
-    static char buf[2 + (2 * sizeof(checksum_t)) + 1] = "";
-    static String valid_str;
+    checksum_t checksum_tmp;
+    char buf[2 + (2 * sizeof(checksum_t)) + 1] = "";
+    String valid_str;
     valid_str.reserve(8);
 
     valid_str = "";
@@ -465,7 +496,7 @@ void write_usb() {
 //         << HAL_RCC_GetPCLK2Freq() << ' '
 //         << "\r\n";
 
-    calc_checksum<checksum_t>(payload, checksum_tmp);
+    calc_checksum(&payload, &checksum_tmp);
 
     switch (sizeof(checksum_t)) {
         case 1: // uint8_t
@@ -478,9 +509,9 @@ void write_usb() {
             snprintf(buf, sizeof(buf), "0x%08lX", checksum_tmp);
             break;
         case 8: { // uint64_t
-            uint32_t data_h = checksum_tmp >> 32;
-            uint32_t data_l = checksum_tmp & 0xFFFFFFFF;
-            snprintf(buf, sizeof(buf), "0x%08lX%08lX", data_h, data_l);
+            snprintf(buf, sizeof(buf), "0x%08lX%08lX",
+                     uint32_t(checksum_tmp >> 32),
+                     uint32_t(checksum_tmp & 0x00000000FFFFFFFFull));
             break;
         }
     }
@@ -494,10 +525,10 @@ void write_usb() {
 
 void write_comm() {
 #ifndef SIMPLE_RXTX
-    calc_checksum<checksum_t>(payload, checksum);
+    calc_checksum(&payload, &checksum);
     SerialLoRa.write(START_SEQ_DAT, sizeof(START_SEQ_DAT));
-    SerialLoRa.write(reinterpret_cast<uint8_t *>(&checksum), sizeof(decltype(checksum)));
-    SerialLoRa.write(reinterpret_cast<uint8_t *>(&payload), sizeof(decltype(payload)));
+    SerialLoRa.write(reinterpret_cast<uint8_t *>(&checksum), sizeof(checksum_t));
+    SerialLoRa.write(reinterpret_cast<uint8_t *>(&payload), sizeof(struct mcu0_data));
 #else
     SerialLoRa.println(payload_str);
 #endif
@@ -607,6 +638,7 @@ void debug_prompt_handler(Stream &stream) {
         case '0': // Turn "off" LEDs toggling and LEDs
             scheduler.disable(blink_leds);
             LED_OFF();
+            BUZZER_OFF();
             break;
 
         case '1': // Turn "on" LEDs toggling
@@ -616,6 +648,7 @@ void debug_prompt_handler(Stream &stream) {
         case '2': // Turn "on" static LEDs
             scheduler.disable(blink_leds);
             LED_ON();
+            BUZZER_ON();
             break;
 
         case '3': // set LoRa interval at half interval
@@ -631,8 +664,11 @@ void debug_prompt_handler(Stream &stream) {
             break;
 
         case 'c': // fall through
-        case 'C': // Balloon separation command todo
+        case 'C': { // Balloon separation command
+            servo_delayer.reset();
+            SERVO_ON();
             break;
+        }
 
         case 's': // fall through
         case 'S': // List SD card files
@@ -653,11 +689,6 @@ void debug_prompt_handler(Stream &stream) {
 
         case 'd': // fall through
         case 'D': // Delete all files in all SD Card (All files will be lost!)
-
-#ifndef SIMPLE_RXTX
-            stream.write(START_SEQ_CMD, sizeof(START_SEQ_DAT));
-#endif
-
             if (valid.sd0) {
                 sd0_file.close();
                 delete_all_in(sd0);
