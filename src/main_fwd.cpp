@@ -8,8 +8,7 @@ Servo servo;
 
 void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
-    pinMode(PIN_CTRL, INPUT);
-    pinMode(PIN_SERVO, OUTPUT);
+//    pinMode(PIN_CTRL, INPUT);
     servo.attach(PIN_SERVO);
 }
 

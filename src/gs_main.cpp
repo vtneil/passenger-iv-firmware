@@ -33,7 +33,11 @@ extern void handle_data(const struct mcu0_data &, const checksum_t &);
 
 #endif
 
-task_scheduler<1> scheduler;
+task_scheduler<3> scheduler;
+
+smart_delay sd100(100, millis);
+smart_delay sd5000(5000, millis);
+uint8_t btn_cnt;
 
 void setup() {
     // Enable onboard LED
@@ -72,7 +76,25 @@ void setup() {
     payload_str.reserve(PAYLOAD_STR_MAX_LEN);
 #endif
 
-    scheduler.add_task([]() -> void { digitalToggle(PIN_BOARD_LED); }, SET_INT(250u), millis);
+    // Placeholder
+    scheduler.add_task([]() -> void {}, 10000ul, millis);
+
+    // Button
+//    btn_cnt = 0;
+//    scheduler.add_task([]() -> void {
+//        if (1 <= btn_cnt && btn_cnt <= 5) {
+//            SerialLoRa.print("CCCCC");
+//            ++btn_cnt;
+//        } else {
+//            btn_cnt = 0;
+//        }
+//    }, 1000, millis);
+//    scheduler.disable(1);
+
+    // Blink
+    scheduler.add_task([]() -> void {
+        digitalToggle(PIN_BOARD_LED);
+    }, SET_INT(250u), millis);
 }
 
 void loop() {
@@ -169,6 +191,20 @@ void loop() {
 #endif
 
     scheduler.exec();
+
+    // Button watcher
+//    if (digitalRead(PIN_GCS_BTN)) {
+//        if (btn_cnt == 0) {
+//            sd5000.reset();
+//            btn_cnt = 1;
+//        } else if (btn_cnt == 1) {
+//            if (sd5000) {
+//                scheduler.enable(1);
+//            }
+//        }
+//    } else {
+//        scheduler.disable(1);
+//    }
 }
 
 #ifndef SIMPLE_RXTX

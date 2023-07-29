@@ -22,6 +22,7 @@
 #include "psg_4_definitions.h"
 #include "psg_4_sd_tools.h"
 #include "psg_4_data_tools.h"
+#include <Servo.h>
 
 /*
  * Namespaces
@@ -117,6 +118,8 @@ DallasTemperature ds18b20;          // External: DS18B20
 Adafruit_MPRLS mprls;               // Probe   : MPRLS
 Adafruit_BNO08x bno085;             // Internal: BNO08x
 
+Servo servo;
+
 /*
  * Smart delayers and Scheduler
  */
@@ -186,6 +189,20 @@ void setup() {
     // USB CDC Serial
     Serial.begin();
 
+    // Servo
+    servo.attach(PIN_SERVO_CUT);
+
+//    while (true) {
+//        SERVO_ON();
+//        LED_ON();
+//        BUZZER_ON();
+//        delay(5000);
+//        SERVO_OFF();
+//        LED_OFF();
+//        BUZZER_OFF();
+//        delay(5000);
+//    }
+
     // Intentional delay for exactly 1000 ms
     delayMicroseconds(1000ul * 1000ul);
 
@@ -249,17 +266,6 @@ void setup() {
 
     // Servo (checker and disabler) (1)
     pinMode(PIN_SERVO_CUT, OUTPUT);
-
-    while (true) {
-        LED_ON();
-        BUZZER_ON();
-        SERVO_ON();
-        delay(5000);
-        LED_OFF();
-        BUZZER_OFF();
-        SERVO_OFF();
-        delay(5000);
-    }
 
     scheduler.add_task([]() -> void {
         if (servo_delayer) {
@@ -664,11 +670,15 @@ void debug_prompt_handler(Stream &stream) {
             break;
 
         case 'c': // fall through
-        case 'C': { // Balloon separation command
+        case 'C': // Balloon separation command
             servo_delayer.reset();
             SERVO_ON();
             break;
-        }
+
+        case 'u': // fall through
+        case 'U': // CANCEL Balloon separation command
+            SERVO_OFF();
+            break;
 
         case 's': // fall through
         case 'S': // List SD card files

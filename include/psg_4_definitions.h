@@ -47,6 +47,8 @@
 #define COMM_INT_LORA           (4000ul)
 
 // Pins Configuration
+#define PIN_GCS_BTN             PB1
+
 #define PIN_BOARD_LED           PC13
 #define PIN_LED                 PB4
 #define PIN_BUZZER              PB12
@@ -86,8 +88,10 @@
 #define BUZZER_OFF()            digitalWrite(PIN_BUZZER, 0)
 #define BUZZER_TOGGLE()         digitalToggle(PIN_BUZZER)
 
-#define SERVO_OFF()             digitalWrite(PIN_SERVO_CUT, LOW)
-#define SERVO_ON()              digitalWrite(PIN_SERVO_CUT, HIGH)
+//#define SERVO_OFF()             digitalWrite(PIN_SERVO_CUT, LOW)
+//#define SERVO_ON()              digitalWrite(PIN_SERVO_CUT, HIGH)
+#define SERVO_OFF()             servo.writeMicroseconds(1500)
+#define SERVO_ON()              servo.writeMicroseconds(0)
 
 // Other parameters
 #define UBLOX_CUSTOM_MAX_WAIT   (250u)
