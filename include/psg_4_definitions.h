@@ -46,8 +46,13 @@
 #define COMM_INT_USB            (1000ul)
 #define COMM_INT_LORA           (4000ul)
 
+#define F_NAME                  "MCU0_DATA_SD0_"
+#define F_EXT                   ".CSV"
+
 // Pins Configuration
-#define PIN_GCS_BTN             PB1
+#define GCS_PIN_BTN             PB0
+#define GCS_PIN_KEY             PA0
+#define PIN_KEY                 PA0
 
 #define PIN_BOARD_LED           PC13
 #define PIN_LED                 PB4
@@ -75,27 +80,24 @@
 #define GCS_PIN_LORA_M1         PB4
 #define GCS_PIN_LORA_M0         PB3
 
-#define EXT_TEMP_PIN            PA8
+#define PIN_DS18B20             PB9
 
 // Pin Macros
-#define LED_ON()                digitalWrite(PIN_BOARD_LED, 0); \
-                                digitalWrite(PIN_LED, 1)
-#define LED_OFF()               digitalWrite(PIN_BOARD_LED, 1); \
-                                digitalWrite(PIN_LED, 0)
-#define LED_TOGGLE()            digitalToggle(PIN_BOARD_LED); \
-                                digitalToggle(PIN_LED)
+#define LED_ON()                digitalWrite(PIN_BOARD_LED, 0);
+#define LED_OFF()               digitalWrite(PIN_BOARD_LED, 1);
+#define LED_TOGGLE()            digitalToggle(PIN_BOARD_LED);
 #define BUZZER_ON()             digitalWrite(PIN_BUZZER, 1)
 #define BUZZER_OFF()            digitalWrite(PIN_BUZZER, 0)
 #define BUZZER_TOGGLE()         digitalToggle(PIN_BUZZER)
 
 //#define SERVO_OFF()             digitalWrite(PIN_SERVO_CUT, LOW)
 //#define SERVO_ON()              digitalWrite(PIN_SERVO_CUT, HIGH)
-#define SERVO_OFF()             servo.writeMicroseconds(1500)
+#define SERVO_OFF()             servo.writeMicroseconds(DEFAULT_PULSE_WIDTH)
 #define SERVO_ON()              servo.writeMicroseconds(0)
 
 // Other parameters
 #define UBLOX_CUSTOM_MAX_WAIT   (250u)
-#define BME280_ADDRESS          (0x77)
+#define BME280_ADDRESS          (0x76)
 
 #define I2C_CLOCK_STANDARD      (100000u)
 #define I2C_CLOCK_FAST          (400000u)
@@ -205,7 +207,6 @@ protected:
         constexpr OutputType MASK = ZERO - ONE;
         constexpr size_t Q = sizeof(InputType) / sizeof(OutputType);
         constexpr size_t R = sizeof(InputType) % sizeof(OutputType);
-        constexpr size_t S = DIV_CEIL(sizeof(InputType), sizeof(OutputType));
         constexpr size_t BITS_SHIFT = 4 * sizeof(OutputType);
         constexpr OutputType MASK_H = MASK << BITS_SHIFT;
         constexpr OutputType MASK_L = ~MASK_H;
@@ -251,6 +252,9 @@ protected:
 };
 
 calc_checksum_t<struct mcu0_data, checksum_t> calc_checksum = calc_checksum_t<struct mcu0_data, checksum_t>();
+
+template<size_t N>
+using byte_array = uint8_t[N];
 
 // System Clock Configurations
 extern "C" void SystemClock_Config(void) {

@@ -53,8 +53,8 @@ SdFat32 sd1;
 File32 sd1_file;
 String sd1_filename;
 
-OneWire one_wire_dallas(EXT_TEMP_PIN);
-DeviceAddress one_wire_addresses;
+OneWire one_wire_ds18b20(PIN_DS18B20);
+DeviceAddress dev_addr;
 arduino_iostream cout(Serial);
 
 /*
@@ -113,9 +113,9 @@ struct peripherals {
 lora_e22 lora(SerialLoRa, PIN_LORA_M0, PIN_LORA_M1);
 SFE_UBLOX_GNSS m10s;                // Internal: SF u-blox M10S
 bme280_t bme280;                    // Internal: BME280
-Adafruit_MS8607 ms8607;             // External: MS8607
-DallasTemperature ds18b20;          // External: DS18B20
-Adafruit_MPRLS mprls;               // Probe   : MPRLS
+//Adafruit_MS8607 ms8607;             // External: MS8607
+//Adafruit_MPRLS mprls;               // Probe   : MPRLS
+DallasTemperature ds18b20(&one_wire_ds18b20);          // External: DS18B20
 Adafruit_BNO08x bno085;             // Internal: BNO08x
 
 Servo servo;
@@ -125,6 +125,7 @@ Servo servo;
  */
 task_scheduler<20> scheduler;
 smart_delay servo_delayer(TIME_SERVO_CUT, millis);
+HardwareTimer timer_led = HardwareTimer(TIM1);
 
 /*
  * Functions
@@ -139,11 +140,11 @@ extern void read_bno085();
 
 extern void read_bme280();
 
-extern void read_ms8607();
+//extern void read_ms8607();
 
 extern void read_ds18b20();
 
-extern void read_mprls();
+//extern void read_mprls();
 
 extern void read_m10s();
 
@@ -167,11 +168,15 @@ void setup() {
 #ifdef ENABLE_IWDT
     static_cast<void>(IWatchdog.isReset(true));
 #endif
+
     // Device Presets
     payload.band_id = 0;  // Set ID to main device
     payload.state = state_t::INVALID;
     payload.last_response = 'x';
     payload_str.reserve(PAYLOAD_STR_MAX_LEN);
+
+    analogReadResolution(MY_ADC_RESOLUTION);
+    analogWriteResolution(MY_ADC_RESOLUTION);
 
     // Enable onboard LED
     pinMode(PIN_BOARD_LED, OUTPUT);
@@ -182,9 +187,21 @@ void setup() {
     // Enable internal buzzer
     pinMode(PIN_BUZZER, OUTPUT);
 
-    // Turn on all LEDs
+    // Turn on LED
     LED_ON();
-    BUZZER_ON();
+
+    // Setup PWM LED
+    timer_led.setOverflow(480, MICROSEC_FORMAT);
+    timer_led.attachInterrupt([]() -> void {
+        static uint16_t pwm_val = 0;
+        static bool direction = true;
+        if (direction) ++pwm_val;
+        else --pwm_val;
+        if (pwm_val == MY_ADC_MAX_VALUE - 1) direction = false;
+        else if (pwm_val == 0) direction = true;
+        analogWrite(PIN_LED, pwm_val);
+    });
+    timer_led.resume();
 
     // USB CDC Serial
     Serial.begin();
@@ -192,29 +209,22 @@ void setup() {
     // Servo
     servo.attach(PIN_SERVO_CUT);
 
-//    while (true) {
-//        SERVO_ON();
-//        LED_ON();
-//        BUZZER_ON();
-//        delay(5000);
-//        SERVO_OFF();
-//        LED_OFF();
-//        BUZZER_OFF();
-//        delay(5000);
-//    }
-
     // Intentional delay for exactly 1000 ms
     delayMicroseconds(1000ul * 1000ul);
 
+    // Turn off the buzzer
+    BUZZER_OFF();
+
     // Config LoRa
-#ifdef CONFIG_LORA
-    config_lora();
-#endif
+    if (!digitalRead(GCS_PIN_KEY)) {
+        config_lora();
+    }
+    while (!digitalRead(GCS_PIN_KEY));
 
     // SPI SD0 (Internal Flash)
     valid.sd0 = sd0.begin(SdSpiConfig(PIN_SPI_CS_SD_INT, SHARED_SPI, SD_SCK_MHZ(SPI_SPEED_SD_MHZ), &SPI_SD));
     if (valid.sd0) {
-        make_new_filename(sd0, sd0_filename, "mcu0_data_sd0_", ".csv");
+        make_new_filename(sd0, sd0_filename, F_NAME, F_EXT);
         open_for_append(sd0, sd0_file, sd0_filename);
     }
 
@@ -238,7 +248,7 @@ void setup() {
     valid.bme280 = (0x60 == bme280.begin(BME280_ADDRESS));
 
     // MS8607 (0x76 and 0x40)
-    valid.ms8607 = ms8607.begin();
+//    valid.ms8607 = ms8607.begin();
 
     // BNO085 (0x4A)
     valid.bno085 = bno085.begin_I2C();
@@ -250,19 +260,18 @@ void setup() {
         m10s.setI2COutput(COM_TYPE_UBX, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
         m10s.setNavigationFrequency(5, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
         m10s.setAutoPVT(true, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
-        m10s.setDynamicModel(DYN_MODEL_AIRBORNE2g, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
+        m10s.setDynamicModel(DYN_MODEL_AIRBORNE4g, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
 
 //        m10s.saveConfiguration(UBLOX_CUSTOM_MAX_WAIT);  // (For saving to module's flash memory, optional)
     }
 
     // MPRLS (0x18)
-    valid.mprls = mprls.begin();
+//    valid.mprls = mprls.begin();
 
     // DS18B20
-    ds18b20.setOneWire(&one_wire_dallas);
-    ds18b20.setResolution(9);
     ds18b20.begin();
-    valid.ds18b20 = ds18b20.getAddress(one_wire_addresses, 0);
+    valid.ds18b20 = ds18b20.getAddress(dev_addr, 0);
+    ds18b20.setResolution(dev_addr, 9);
 
     // Servo (checker and disabler) (1)
     pinMode(PIN_SERVO_CUT, OUTPUT);
@@ -275,7 +284,6 @@ void setup() {
 
     // Battery Voltage Readings (1)
     pinMode(PIN_VBATT, INPUT_ANALOG);
-    analogReadResolution(MY_ADC_RESOLUTION);
     scheduler.add_task([]() -> void {
         payload.batt_volt = (analogRead(PIN_VBATT) * 100) / MY_ADC_MAX_VALUE;
     }, SET_INT(1000ul), millis);
@@ -284,8 +292,8 @@ void setup() {
 #ifdef ENABLE_SENSORS
     scheduler
             .add_task(read_bme280, SET_INT(100ul), millis, valid.bme280)
-            .add_task(read_ms8607, SET_INT(100ul), millis, valid.ms8607)
-            .add_task(read_mprls, SET_INT(200ul), millis, valid.mprls)
+//            .add_task(read_ms8607, SET_INT(100ul), millis, valid.ms8607)
+//            .add_task(read_mprls, SET_INT(200ul), millis, valid.mprls)
             .add_task(read_m10s, SET_INT(500ul), millis, valid.m10s)
             .add_task(read_bno085, SET_INT(100ul * 1000ul), micros, valid.bno085)
             .add_task(read_ds18b20, SET_INT(1000ul), millis, valid.ds18b20);
@@ -351,6 +359,7 @@ void config_lora() {
                    LORA_CHANNEL,
                    240u,
                    true);
+    lora.query_param();
     delay(100u);
     lora.begin(115200u);
 }
@@ -402,26 +411,27 @@ void read_bme280() {
     payload.temperature_int = bme280.read_temperature_c();
 }
 
-void read_ms8607() {
-    static sensors_event_t sp;
-    static sensors_event_t st;
-    static sensors_event_t sh;
-    ms8607.getEvent(&sp, &st, &sh);
-    payload.pressure_ext = sp.pressure;
-    payload.temperature_ext = st.temperature;
-    payload.humidity_ext = sh.relative_humidity;
-    payload.altitude_ext = static_cast<float>(calc_altitude_approx_slow(payload.pressure_ext));
-}
+//void read_ms8607() {
+//    static sensors_event_t sp;
+//    static sensors_event_t st;
+//    static sensors_event_t sh;
+//    ms8607.getEvent(&sp, &st, &sh);
+//    payload.pressure_ext = sp.pressure;
+//    payload.temperature_ext = st.temperature;
+//    payload.humidity_ext = sh.relative_humidity;
+//    payload.altitude_ext = static_cast<float>(calc_altitude_approx_slow(payload.pressure_ext));
+//}
 
 void read_ds18b20() {
-    ds18b20.requestTemperaturesByAddress(one_wire_addresses);
-    payload.temperature_probe = ds18b20.getTempC(one_wire_addresses);
+    ds18b20.requestTemperaturesByAddress(dev_addr);
+    payload.temperature_probe = ds18b20.getTempC(dev_addr);
 }
 
-void read_mprls() {
-    payload.pressure_probe = mprls.readPressure();
-    payload.altitude_probe = static_cast<float>(calc_altitude_approx_slow(payload.pressure_probe));
-}
+
+//void read_mprls() {
+//    payload.pressure_probe = mprls.readPressure();
+//    payload.altitude_probe = static_cast<float>(calc_altitude_approx_slow(payload.pressure_probe));
+//}
 
 void read_m10s() {
     if (m10s.getPVT()) {
@@ -645,16 +655,21 @@ void debug_prompt_handler(Stream &stream) {
             scheduler.disable(blink_leds);
             LED_OFF();
             BUZZER_OFF();
+            timer_led.pause();
+            analogWrite(PIN_LED, 0);
             break;
 
         case '1': // Turn "on" LEDs toggling
             scheduler.enable(blink_leds);
+            timer_led.resume();
             break;
 
         case '2': // Turn "on" static LEDs
             scheduler.disable(blink_leds);
             LED_ON();
             BUZZER_ON();
+            timer_led.pause();
+            analogWrite(PIN_LED, MY_ADC_MAX_VALUE - 1);
             break;
 
         case '3': // set LoRa interval at half interval
@@ -678,6 +693,21 @@ void debug_prompt_handler(Stream &stream) {
         case 'u': // fall through
         case 'U': // CANCEL Balloon separation command
             SERVO_OFF();
+            break;
+
+        case 'a': // fall through
+        case 'A': // Airborne 2G
+            m10s.setDynamicModel(DYN_MODEL_AIRBORNE2g, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
+            break;
+
+        case 'b': // fall through
+        case 'B': // Airborne 4G
+            m10s.setDynamicModel(DYN_MODEL_AIRBORNE4g, VAL_LAYER_RAM_BBR, UBLOX_CUSTOM_MAX_WAIT);
+            break;
+
+        case 'h': // fall through
+        case 'H': // Hard reset GNSS module
+            m10s.hardReset();
             break;
 
         case 's': // fall through
@@ -723,12 +753,18 @@ void debug_prompt_handler(Stream &stream) {
             break;
 
         case 'r': // fall through
-        case 'R': // System Reset
+        case 'R': // Perform System Reset
+            if (valid.sd0) {
+                sd0_file.close();
+            }
+            if (valid.sd1) {
+                sd0_file.close();
+            }
             __NVIC_SystemReset();
+
 
         case 'x': // fall through
         case 'X': // Do nothing and reset latest response
-            payload.last_response = 'x';
             break;
 
         default: // Invalid command

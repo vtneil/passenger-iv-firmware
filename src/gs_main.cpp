@@ -6,6 +6,8 @@
 
 //#define CONFIG_LORA
 
+#define MAX_NUM_TX              (10)
+#define MAX_INT_TX              (500)
 #define FORWARD_COMM
 //#define PRINT_CHECKSUM
 
@@ -33,16 +35,21 @@ extern void handle_data(const struct mcu0_data &, const checksum_t &);
 
 #endif
 
-task_scheduler<3> scheduler;
+task_scheduler<5> scheduler;
 
-smart_delay sd100(100, millis);
-smart_delay sd5000(5000, millis);
+smart_delay sd_btn(5000, millis);
+smart_delay sd_key(2000, millis);
 uint8_t btn_cnt;
+uint8_t key_cnt;
 
 void setup() {
     // Enable onboard LED
     pinMode(PIN_BOARD_LED, OUTPUT);
-    digitalWrite(PIN_BOARD_LED, !HIGH);
+    digitalWrite(PIN_BOARD_LED, !LOW);
+
+    // Buttons Pinout
+    pinMode(GCS_PIN_BTN, INPUT);
+    pinMode(GCS_PIN_KEY, INPUT);
 
     // USB CDC Serial
     Serial.begin();
@@ -51,22 +58,26 @@ void setup() {
     delayMicroseconds(1000ul * 1000ul);
 
     // Config LoRa
-#ifdef CONFIG_LORA
-    Serial.println("Beginning configuration mode...");
-    lora.config();
-    Serial.println("Entered configuration mode!");
-    lora.set_param(0xffff,
-                    0,
-                    115200u,
-                    LoRaParity::PARITY_8N1,
-                    2400u,
-                    LORA_CHANNEL,
-                    240u,
-                    true);
-    lora.query_param();
-    Serial.println("Done config!");
-    delay(100u);
-#endif
+    if (!digitalRead(GCS_PIN_KEY)) {
+        Serial.println("Beginning configuration mode...");
+        lora.config();
+        Serial.println("Entered configuration mode!");
+        lora.set_param(0xffff,
+                       0,
+                       115200u,
+                       LoRaParity::PARITY_8N1,
+                       2400u,
+                       LORA_CHANNEL,
+                       240u,
+                       true);
+        lora.query_param();
+        Serial.println("Done config!");
+        delay(100u);
+    }
+    while (!digitalRead(GCS_PIN_KEY));
+
+    // Prevent button accidents
+    while (digitalRead(GCS_PIN_BTN));
 
     // LoRa
     lora.begin(115200u);
@@ -76,25 +87,42 @@ void setup() {
     payload_str.reserve(PAYLOAD_STR_MAX_LEN);
 #endif
 
-    // Placeholder
+    // Placeholder (blank)
     scheduler.add_task([]() -> void {}, 10000ul, millis);
 
     // Button
-//    btn_cnt = 0;
-//    scheduler.add_task([]() -> void {
-//        if (1 <= btn_cnt && btn_cnt <= 5) {
-//            SerialLoRa.print("CCCCC");
-//            ++btn_cnt;
-//        } else {
-//            btn_cnt = 0;
-//        }
-//    }, 1000, millis);
-//    scheduler.disable(1);
+    btn_cnt = 0;
+    // 1
+    scheduler.add_task([]() -> void {
+        if (1 <= btn_cnt && btn_cnt <= MAX_NUM_TX) {
+            SerialLoRa.print("CCCCC");
+            ++btn_cnt;
+        }
+    }, MAX_INT_TX, millis);
+    scheduler.disable(1);
 
-    // Blink
+    // Board Button
+    key_cnt = 0;
+    // 2
+    scheduler.add_task([]() -> void {
+        if (1 <= key_cnt && key_cnt <= MAX_NUM_TX) {
+            SerialLoRa.print("UUUUU");
+            ++btn_cnt;
+        }
+    }, MAX_INT_TX, millis);
+    scheduler.disable(2);
+
+    // Blink Slow
+    // 3
     scheduler.add_task([]() -> void {
         digitalToggle(PIN_BOARD_LED);
     }, SET_INT(250u), millis);
+
+    // Blink Fast
+    // 4
+    scheduler.add_task([]() -> void {
+        digitalToggle(PIN_BOARD_LED);
+    }, SET_INT(125u), millis);
 }
 
 void loop() {
@@ -158,6 +186,7 @@ void loop() {
                         data_data = *reinterpret_cast<struct mcu0_data *>(payload_buf + sizeof(checksum_t));
                         calc_checksum(payload_buf + sizeof(checksum_t), &checksum_dst);
 
+                        // Checksum compare
                         if (checksum_src == checksum_dst) {
                             handle_data(data_data, checksum_src);
                         }
@@ -181,6 +210,8 @@ void loop() {
                 break;
             }
         }
+
+        digitalToggle(PIN_BOARD_LED);
     }
 #else
     while (SerialLoRa.available()) Serial.write(SerialLoRa.read());
@@ -192,19 +223,65 @@ void loop() {
 
     scheduler.exec();
 
-    // Button watcher
-//    if (digitalRead(PIN_GCS_BTN)) {
-//        if (btn_cnt == 0) {
-//            sd5000.reset();
-//            btn_cnt = 1;
-//        } else if (btn_cnt == 1) {
-//            if (sd5000) {
-//                scheduler.enable(1);
-//            }
-//        }
-//    } else {
-//        scheduler.disable(1);
-//    }
+    int read_btn = digitalRead(GCS_PIN_BTN);
+    int read_key = !digitalRead(GCS_PIN_KEY);
+
+    switch ((read_btn << 1) | read_key) {
+        case 0b00:
+            btn_cnt = 0;
+            key_cnt = 0;
+            scheduler.disable(1);
+            scheduler.disable(2);
+            scheduler.enable(3);
+            scheduler.disable(4);
+            break;
+
+        case 0b10: {
+            if (btn_cnt == 0) {
+                scheduler.disable(3);
+                digitalWrite(PIN_BOARD_LED, !HIGH);
+                sd_btn.reset();
+                btn_cnt = 1;
+            } else if (btn_cnt == 1) {
+                if (sd_btn) {
+                    scheduler.enable(1);
+                    scheduler.disable(3);
+                    scheduler.enable(4);
+                }
+            } else if (btn_cnt > MAX_NUM_TX) {
+                scheduler.disable(1);
+                scheduler.enable(3);
+                scheduler.disable(4);
+            }
+            break;
+        }
+
+        case 0b01: {
+            if (key_cnt == 0) {
+                scheduler.disable(3);
+                digitalWrite(PIN_BOARD_LED, !LOW);
+                sd_key.reset();
+                key_cnt = 1;
+            } else if (key_cnt == 1) {
+                if (sd_key) {
+                    scheduler.enable(2);
+                    scheduler.disable(3);
+                    scheduler.enable(4);
+                }
+            } else if (key_cnt > MAX_NUM_TX) {
+                scheduler.disable(2);
+                scheduler.enable(3);
+                scheduler.disable(4);
+            }
+            break;
+        }
+
+        case 0b11:
+        default:
+            scheduler.disable(1);
+            scheduler.disable(2);
+            break;
+    }
 }
 
 #ifndef SIMPLE_RXTX
